@@ -1,0 +1,22 @@
+services:
+  dealforge:
+    build: .
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      APP_PASSWORD: "${APP_PASSWORD:?APP_PASSWORD is required}"
+      SESSION_SECRET: "${SESSION_SECRET:?SESSION_SECRET is required}"
+      APP_ORIGIN: "${APP_ORIGIN:-http://localhost:3000}"
+      DEMO_MODE: "${DEMO_MODE:-false}"
+      ENABLE_SCHEDULER: "${ENABLE_SCHEDULER:-false}"
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-300}"
+      EBAY_APP_ID: "${EBAY_APP_ID:-}"
+      EBAY_CLIENT_SECRET: "${EBAY_CLIENT_SECRET:-}"
+      KLAZ_API_KEY: "${KLAZ_API_KEY:-}"
+    volumes:
+      - dealforge_db:/app/data
+    restart: unless-stopped
+volumes:
+  dealforge_db:

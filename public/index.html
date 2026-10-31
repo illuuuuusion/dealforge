@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b1020"><title>DealForge – Find. Fix. Flip.</title><link rel="stylesheet" href="/styles.css"></head>
+<body>
+<div id="login" class="login-layer" hidden><form id="login-form" class="login-panel"><div class="brand-mark">D<span>✦</span></div><h1>DealForge</h1><p>Dein persönliches Deal-Radar. Bitte anmelden.</p><input id="password" type="password" placeholder="App-Passwort" autocomplete="current-password" required><button class="btn primary" type="submit">Anmelden</button><p id="login-error" class="error"></p></form></div>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark">D<span>✦</span></div><div><strong>DealForge</strong><small>FIND · FIX · FLIP</small></div></div>
+    <div class="side-label">WORKSPACE</div>
+    <nav class="nav">
+      <button class="nav-item active" data-view="all"><span>◈</span> Übersicht</button>
+      <button class="nav-item" data-view="schnapper"><span>ϟ</span> Schnapper</button>
+      <button class="nav-item" data-view="deal"><span>◎</span> Preisalarme</button>
+      <button class="nav-item" data-view="repair"><span>⚒</span> Repair Lab</button>
+    </nav>
+    <div class="side-label gap-top">KONFIGURATION</div>
+    <button id="focus-watchlists" class="nav-item"><span>⌕</span> Suchprofile</button>
+    <div class="sidebar-bottom"><div class="dot"></div><span>Multi-Marketplace Monitor</span><small id="runtime-state">Bereit</small></div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><div class="breadcrumbs">DEALFORGE <span>/</span> <b id="current-view">Übersicht</b></div><div class="top-actions"><span id="demo-pill" class="demo-pill" hidden>DEMO-MODUS</span><button id="notify" class="btn secondary small">🔔 Browser-Alerts</button><button id="scan" class="btn primary small">↻ Jetzt prüfen</button></div></header>
+    <div class="content">
+      <div class="page-head"><div><div class="eyebrow">DEIN HARDWARE-RADAR</div><h1>Finde Chancen, <em>bevor sie weg sind.</em></h1><p>eBay, Kleinanzeigen und Facebook Marketplace in einem übersichtlichen Feed.</p></div><div class="live-indicator"><i></i><span id="last-update">Aktuelle Ansicht</span></div></div>
+      <div class="stats-grid"><div class="stat"><div class="stat-label">ENTDECKTE ANZEIGEN</div><div id="stat-total" class="stat-value">–</div><div class="stat-foot">Über alle Quellen</div></div><div class="stat"><div class="stat-label">AKTIVE SUCHPROFILE</div><div id="stat-watches" class="stat-value">–</div><div class="stat-foot">Individuelle Preisgrenzen</div></div><div class="stat"><div class="stat-label">GEMERKT</div><div id="stat-saved" class="stat-value">–</div><div class="stat-foot">Deine Favoriten</div></div><div class="stat accent"><div class="stat-label">REPAIR-KANDIDATEN</div><div id="stat-repair" class="stat-value">–</div><div class="stat-foot">Mit Fehlerbeschreibung</div></div></div>
+      <div class="section-title"><div><h2>Deal-Feed</h2><p>Priorisiert nach Aktualität, Preisvorteil und Reparaturpotenzial</p></div><div class="filters"><select id="source-filter" aria-label="Marktplatz"><option value="all">Alle Marktplätze</option><option value="ebay">eBay</option><option value="kleinanzeigen">Kleinanzeigen</option><option value="facebook">Facebook</option></select><select id="watch-filter" aria-label="Profil"><option value="">Alle Profile</option></select></div></div>
+      <div id="feed" class="feed"><div class="empty">Lade Angebote …</div></div>
+      <div class="two-column"><section class="panel" id="watch-panel"><div class="panel-heading"><div><h2>Suchprofile</h2><p>Je Gerät eigene Preisgrenzen festlegen</p></div><span class="icon-circle">⌕</span></div><div id="watchlist" class="watch-list"></div><form id="watch-form" class="watch-form"><h3>Neues Profil</h3><div class="form-grid"><label>Name<input name="name" placeholder="RTX 5090" required maxlength="120"></label><label>Suchbegriff<input name="query" placeholder="RTX 5090" required maxlength="120"></label><label>Max. funktionsfähig (€)<input name="maxWorking" type="number" min="0" step="0.01" value="1000" required></label><label>Max. defekt (€)<input name="maxDefect" type="number" min="0" step="0.01" value="250" required></label><label>Geschätzter Wiederverkauf (€)<input name="expectedResale" type="number" min="0" step="0.01" placeholder="optional"></label><label>Reparaturbudget (€)<input name="repairBudget" type="number" min="0" step="0.01" value="50" required></label></div><div class="checks"><label><input type="checkbox" name="sourceList" value="ebay" checked> eBay</label><label><input type="checkbox" name="sourceList" value="kleinanzeigen" checked> Kleinanzeigen</label><label><input type="checkbox" name="sourceList" value="facebook" checked> Facebook</label></div><button class="btn primary" type="submit">+ Suchprofil erstellen</button></form></section>
+      <section class="panel"><div class="panel-heading"><div><h2>Quellen & Integration</h2><p>Live-Zugänge und offene Freigaben</p></div><span class="icon-circle">⌁</span></div><div id="provider-list" class="provider-list"></div><div class="panel-divider"></div><h3>Facebook-Import (Testmodus)</h3><p class="helper">Füge ein JSON-Array aus einem Testexport ein. Es wird kein Facebook-Crawler ausgeführt. Maximal 100 Datensätze.</p><textarea id="import-json" rows="6" placeholder='[{"id":"123","title":"RTX 5080","priceAmount":550,"url":"https://www.facebook.com/marketplace/item/123"}]'></textarea><button id="import" class="btn secondary">JSON importieren</button><div id="import-message" class="helper"></div><div class="panel-divider"></div><div class="note"><strong>Wichtig zur Preisbewertung</strong><p>„Deal“ basiert bisher auf <em>deiner Kaufgrenze</em>, nicht auf einem behaupteten Marktmittelwert. Reparaturmargen sind Szenarien, keine Garantien.</p></div></section></div>
+      <footer>DealForge · MVP 0.1 · Eigenständige WebApp ohne Discord · <span id="footer-sync">–</span></footer>
+    </div>
+  </main>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script type="module" src="/app.js"></script>
+</body></html>

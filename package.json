@@ -1,0 +1,14 @@
+{
+  "name": "dealforge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-marketplace deal finder for deals, fast finds and repair projects",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test tests/*.test.js",
+    "probe": "node scripts/probe.js"
+  }
+}
