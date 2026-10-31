@@ -22,7 +22,8 @@ test('Rapid deal and conventional deal are independent',()=>{
 });
 test('Do not invent market average or free shipping',()=>{
  const a=scoreListing({...base,shippingEur:null},w);
- assert.equal(a.shippingKnown,false);assert.ok(a.reasons.includes('Versandkosten unbekannt'));
+ assert.equal(a.shippingKnown,false);assert.equal(a.knownTotalEur,null);
+ assert.ok(a.reasons.includes('Versandkosten unbekannt – Gesamtpreis prüfen'));
 });
 test('One watchlist can detect titles case-insensitively',()=>{
  assert.ok(matchesWatchlist({title:'NVIDIA RTX 4070 SUPER OC'},w));

@@ -4,11 +4,19 @@
   "private": true,
   "type": "module",
   "description": "Multi-marketplace deal finder for deals, fast finds and repair projects",
-  "engines": { "node": ">=22.13.0" },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test tests/*.test.js",
-    "probe": "node scripts/probe.js"
+    "probe": "node scripts/probe.js",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "eslint": "9.39.5",
+    "globals": "16.5.0"
   }
 }

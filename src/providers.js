@@ -1,4 +1,5 @@
 /** Only eBay uses an official read API. Kleinanzeigen Agent is a third-party pilot. */
+import { resolveWatchTargets,bucketForProfile } from './gpu.js';
 const timeoutMs=14000;
 async function jsonFetch(url, options={}) {
   const response=await fetch(url,{...options,signal:AbortSignal.timeout(timeoutMs)});
@@ -26,18 +27,21 @@ function sumShipping(row){
 export function normalizeEbay(row){
   const id=first(row.itemId,row.legacyItemId);
   const url=first(row.itemWebUrl,row.itemAffiliateWebUrl);
-  const price=Number(row.price?.value);
-  if(!id||!url||!Number.isFinite(price)|| (row.price?.currency && row.price.currency!=='EUR'))return null;
+  const options=row.buyingOptions||[];
+  // Auction + Buy It Now counts as fixed price (price = BIN); pure auctions report the current bid.
+  const offerType=options.includes('FIXED_PRICE')?'FIXED_PRICE':options.includes('AUCTION')?'AUCTION':'OTHER';
+  const priceInfo=offerType==='AUCTION'?(row.currentBidPrice??row.price):row.price;
+  const price=Number(priceInfo?.value);
+  if(!id||!url||!Number.isFinite(price)|| (priceInfo?.currency && priceInfo.currency!=='EUR'))return null;
   return {source:'ebay',externalId:String(id),title:row.title||'',description:row.shortDescription||'',
     url, imageUrl:row.image?.imageUrl??null,priceEur:price,shippingEur:sumShipping(row),
     condition:row.condition||'',publishedAt:row.itemOriginDate||null,
-    offerType:row.buyingOptions?.includes('AUCTION')?'AUCTION':row.buyingOptions?.includes('FIXED_PRICE')?'FIXED_PRICE':'OTHER',
-    auctionEndsAt:row.itemEndDate??null,bidCount:row.bidCount??null};
+    offerType,auctionEndsAt:row.itemEndDate??null,bidCount:row.bidCount??null};
 }
 export async function fetchEbay(query,cfg,{auction=false}={}){
   const token=await getEbayToken(cfg);
-  const params=new URLSearchParams({q:query,limit:'50',sort:'newlyListed'});
-  if(auction)params.set('filter','buyingOptions:{AUCTION}');
+  // Without a buyingOptions filter eBay omits pure auctions (verified live 31.10.2026).
+  const params=new URLSearchParams({q:query,limit:'200',sort:'newlyListed',filter:auction?'buyingOptions:{AUCTION}':'buyingOptions:{FIXED_PRICE|AUCTION}'});
   const payload=await jsonFetch(`https://api.ebay.com/buy/browse/v1/item_summary/search?${params}`,{
     headers:{'Authorization':`Bearer ${token}`,'X-EBAY-C-MARKETPLACE-ID':'EBAY_DE','Accept-Language':'de-DE'}});
   return (payload.itemSummaries||[]).map(normalizeEbay).filter(Boolean);
@@ -89,6 +93,20 @@ export const providerReady = cfg=>{
     facebook:{ready:false,approved:false,live:false,kind:'manual-import',status:'Nur manueller Import · NO GO für Live-Suche'}
   };
 };
+/** Provider calls for one scan: eBay GPU watchlists share broad buckets, free-text queries run as-is. */
+export function planScan(watches,ready,source='all'){
+  const pairs=new Map();
+  for(const watch of watches.filter(x=>x.active)){
+    for(const platform of watch.sourceList){
+      if(platform==='facebook'||(source!=='all'&&source!==platform)||!ready[platform]?.live)continue;
+      const targets=platform==='ebay'?resolveWatchTargets(watch.query):null;
+      const buckets=targets?[...targets.profiles].map(bucketForProfile).filter(Boolean):[];
+      if(buckets.length){for(const b of buckets)pairs.set(`ebay|bucket:${b.id}`,{platform,query:b.query,label:b.id});continue;}
+      pairs.set(`${platform}|${watch.query.toLowerCase()}`,{platform,query:watch.query,label:watch.query});
+    }
+  }
+  return [...pairs.values()];
+}
 export async function fetchSource(source,query,cfg){
   if(source==='ebay')return fetchEbay(query,cfg);
   if(source==='kleinanzeigen')return fetchKleinanzeigen(query,cfg);

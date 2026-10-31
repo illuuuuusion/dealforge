@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, createHmac, timingSafeEqual, scryptSync } from 'node:crypto';
 import { config } from './config.js';
 import { openDatabase, watchlists, createWatchlist, deleteWatchlist, toggleWatchlist, ingestListings, listDeals, listStats, setListingStatus, logSourceRun, providerCallsToday } from './db.js';
-import { fetchSource,normalizeFacebook,providerReady } from './providers.js';
+import { profiles } from './gpu.js';
+import { fetchSource,normalizeFacebook,providerReady,planScan } from './providers.js';
 const root=join(dirname(fileURLToPath(import.meta.url)),'../public');
 const db=openDatabase(config.dbPath,{demoMode:config.demoMode});
 const secret=config.sessionSecret || randomBytes(32).toString('hex');
@@ -33,27 +34,21 @@ function mutationAllowed(req){if(req.headers['x-dealforge-action']!=='1')return 
   const expected=config.appOrigin || `http://${req.headers.host}`;
   return origin===expected;
 }
+// Known GPU models for the watchlist form; a query matching one uses profile matching instead of plain text.
+const models=[...new Set(profiles.flatMap(p=>[p.family,p.name.replace(/ Repair$/,'')]).filter(Boolean))].sort();
 let scanning=false;
 async function scan(source='all'){
   if(scanning)throw Error('Scan läuft bereits');
   scanning=true;
   const report=[];
   try{
-    const ready=providerReady(config);
-    const pairs=new Map();
-    for(const watch of watchlists(db).filter(x=>x.active)){
-      for(const platform of watch.sourceList){
-        if(platform==='facebook'||(source!=='all' && source!==platform)||!ready[platform]?.live)continue;
-        pairs.set(`${platform}|${watch.query.toLowerCase()}`,{platform,query:watch.query});
-      }
-    }
-    // Sequential calls to bound provider load. Scheduler defaults to 5 min.
-    for(const {platform,query} of pairs.values()){
+    // Sequential calls to bound provider load.
+    for(const {platform,query,label} of planScan(watchlists(db),providerReady(config),source)){
       // ponytail: per-provider daily call cap from source_runs; per-filter/monthly budgets come with the worker.
-      if(providerCallsToday(db,platform)>=config.dailyCallLimit){report.push({platform,query,ok:false,error:'Tagesbudget erreicht'});continue;}
+      if(providerCallsToday(db,platform)>=config.dailyCallLimit){report.push({platform,query:label,ok:false,error:'Tagesbudget erreicht'});continue;}
       try{const listings=await fetchSource(platform,query,config);const summary=ingestListings(db,listings);
-        logSourceRun(db,platform,summary);report.push({platform,query,ok:true,...summary});}
-      catch(e){logSourceRun(db,platform,null,e.message);report.push({platform,query,ok:false,error:e.message});}
+        logSourceRun(db,platform,summary);report.push({platform,query:label,ok:true,...summary});}
+      catch(e){logSourceRun(db,platform,null,e.message);report.push({platform,query:label,ok:false,error:e.message});}
     }
     return report;
   }finally{scanning=false;}
@@ -84,7 +79,7 @@ async function serve(req,res){
   if(!validSession(req))return send(res,401,{error:'Bitte anmelden',requiresLogin:true});
   if(req.method!=='GET'&&!mutationAllowed(req))return send(res,403,{error:'Origin/Header ungültig'});
   try{
-    if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{watchlists:watchlists(db),stats:listStats(db),providers:providerReady(config),dailyCallLimit:config.dailyCallLimit,demoMode:config.demoMode,scanning});
+    if(req.method==='GET'&&url.pathname==='/api/state')return send(res,200,{watchlists:watchlists(db),stats:listStats(db),providers:providerReady(config),dailyCallLimit:config.dailyCallLimit,models,demoMode:config.demoMode,scanning});
     if(req.method==='GET'&&url.pathname==='/api/deals'){
       const mode=url.searchParams.get('mode')||'all',source=url.searchParams.get('source')||'all';
       const watchlistId=url.searchParams.get('watchlistId');

@@ -48,6 +48,12 @@ export function openDatabase(path, {demoMode=false}={}) {
       fetched INTEGER NOT NULL, inserted INTEGER NOT NULL, message TEXT, happened_at TEXT NOT NULL
     );
   `);
+  // ponytail: additive column migrations only; versioned migrations come with PostgreSQL.
+  const addColumn=(table,column,def)=>{if(!db.prepare(`PRAGMA table_info(${table})`).all().some(c=>c.name===column))db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);};
+  addColumn('listings','offer_type',"TEXT NOT NULL DEFAULT 'FIXED_PRICE'");
+  addColumn('listings','auction_ends_at','TEXT');
+  addColumn('listings','bid_count','INTEGER');
+  addColumn('watchlists','allow_unknown_shipping','INTEGER NOT NULL DEFAULT 0');
   const count=db.prepare('SELECT COUNT(*) AS n FROM watchlists').get().n;
   if(!count){ for (const item of seedWatches) createWatchlist(db,item); }
   if(demoMode && !db.prepare('SELECT COUNT(*) AS n FROM listings').get().n) ingestListings(db,demoData);
@@ -59,7 +65,7 @@ export function openDatabase(path, {demoMode=false}={}) {
   }
   return db;
 }
-function watchFromRow(x) {return {id:x.id,name:x.name,query:x.query,maxWorking:x.max_working,maxDefect:x.max_defect,expectedResale:x.expected_resale,repairBudget:x.repair_budget,sourceList:JSON.parse(x.sources),active:!!x.active,createdAt:x.created_at};}
+function watchFromRow(x) {return {id:x.id,name:x.name,query:x.query,maxWorking:x.max_working,maxDefect:x.max_defect,expectedResale:x.expected_resale,repairBudget:x.repair_budget,sourceList:JSON.parse(x.sources),allowUnknownShipping:!!x.allow_unknown_shipping,active:!!x.active,createdAt:x.created_at};}
 export function watchlists(db){return db.prepare('SELECT * FROM watchlists ORDER BY active DESC, id').all().map(watchFromRow);}
 export function createWatchlist(db,input){
   const name=String(input.name ?? '').trim().slice(0,120);
@@ -68,8 +74,8 @@ export function createWatchlist(db,input){
   const resale=input.expectedResale === null || input.expectedResale === '' || input.expectedResale === undefined ? null : Number(input.expectedResale);
   const sources=(Array.isArray(input.sourceList)?input.sourceList:['ebay']).filter(x=>['ebay','kleinanzeigen','facebook'].includes(x));
   if(!name||!query||sources.length===0||[maxWorking,maxDefect,repairBudget].some(x=>!Number.isFinite(x)||x<0||x>100000)|| (resale!==null&&(!Number.isFinite(resale)||resale<0||resale>100000)))throw Error('Ungültiges Suchprofil: Name, Query, Quelle und Preise prüfen');
-  const result=db.prepare(`INSERT INTO watchlists(name,query,max_working,max_defect,expected_resale,repair_budget,sources,active,created_at)
-      VALUES(?,?,?,?,?,?,?,1,?)`).run(name,query,maxWorking,maxDefect,resale,repairBudget,JSON.stringify(sources),now());
+  const result=db.prepare(`INSERT INTO watchlists(name,query,max_working,max_defect,expected_resale,repair_budget,sources,allow_unknown_shipping,active,created_at)
+      VALUES(?,?,?,?,?,?,?,?,1,?)`).run(name,query,maxWorking,maxDefect,resale,repairBudget,JSON.stringify(sources),input.allowUnknownShipping===true?1:0,now());
   return Number(result.lastInsertRowid);
 }
 export function deleteWatchlist(db,id){
@@ -79,12 +85,13 @@ export function deleteWatchlist(db,id){
 export function toggleWatchlist(db,id,active){
   return db.prepare('UPDATE watchlists SET active=? WHERE id=?').run(active?1:0,id).changes>0;
 }
-function publicListing(row){return {id:row.id,source:row.source,externalId:row.external_id,title:row.title,description:row.description,url:row.url,imageUrl:row.image_url,priceEur:row.price_eur,shippingEur:row.shipping_eur,condition:row.condition,publishedAt:row.published_at,firstSeenAt:row.first_seen_at,lastSeenAt:row.last_seen_at,status:row.status};}
+function publicListing(row){return {id:row.id,source:row.source,externalId:row.external_id,title:row.title,description:row.description,url:row.url,imageUrl:row.image_url,priceEur:row.price_eur,shippingEur:row.shipping_eur,condition:row.condition,publishedAt:row.published_at,offerType:row.offer_type,auctionEndsAt:row.auction_ends_at,bidCount:row.bid_count,firstSeenAt:row.first_seen_at,lastSeenAt:row.last_seen_at,status:row.status};}
 export function ingestListings(db,items){
   const allWatches=watchlists(db).filter(w=>w.active);
   const find=db.prepare('SELECT * FROM listings WHERE source=? AND external_id=?');
-  const insert=db.prepare(`INSERT INTO listings(source,external_id,title,description,url,image_url,price_eur,shipping_eur,condition,published_at,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
-  const update=db.prepare(`UPDATE listings SET title=?,description=?,url=?,image_url=?,price_eur=?,shipping_eur=?,condition=?,published_at=COALESCE(?,published_at),last_seen_at=? WHERE id=?`);
+  const insert=db.prepare(`INSERT INTO listings(source,external_id,title,description,url,image_url,price_eur,shipping_eur,condition,published_at,offer_type,auction_ends_at,bid_count,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const update=db.prepare(`UPDATE listings SET title=?,description=?,url=?,image_url=?,price_eur=?,shipping_eur=?,condition=?,published_at=COALESCE(?,published_at),offer_type=?,auction_ends_at=?,bid_count=?,last_seen_at=? WHERE id=?`);
+  const dropMatch=db.prepare('DELETE FROM matches WHERE listing_id=? AND watchlist_id=?');
   const logPrice=db.prepare('INSERT INTO price_history(listing_id,price_eur,observed_at) VALUES(?,?,?)');
   const upsertMatch=db.prepare(`INSERT INTO matches(listing_id,watchlist_id,assessment,updated_at) VALUES(?,?,?,?) ON CONFLICT(listing_id,watchlist_id) DO UPDATE SET assessment=excluded.assessment,updated_at=excluded.updated_at`);
   let inserted=0, matched=0, priceChanges=0;
@@ -101,13 +108,14 @@ export function ingestListings(db,items){
       const seenAt=now();
       const prior=find.get(item.source,item.externalId);
       let id;
-      const args=[item.title,item.description??'',item.url,item.imageUrl??null,price,item.shippingEur===null||item.shippingEur===undefined?null:Number(item.shippingEur),item.condition??'',item.publishedAt??null];
+      const args=[item.title,item.description??'',item.url,item.imageUrl??null,price,item.shippingEur===null||item.shippingEur===undefined?null:Number(item.shippingEur),item.condition??'',item.publishedAt??null,['AUCTION','OTHER'].includes(item.offerType)?item.offerType:'FIXED_PRICE',item.auctionEndsAt??null,Number.isInteger(item.bidCount)?item.bidCount:null];
       if(!prior){id=Number(insert.run(item.source,item.externalId,...args,seenAt,seenAt).lastInsertRowid);inserted++;logPrice.run(id,price,seenAt);}
       else{ id=prior.id;update.run(...args,seenAt,id);if(prior.price_eur!==price){logPrice.run(id,price,seenAt);priceChanges++;} }
       const listing={...item,firstSeenAt:prior?.first_seen_at??seenAt};
-      for(const w of allWatches){if(!w.sourceList.includes(item.source)||!matchesWatchlist(listing,w))continue;
-        const assessment=scoreListing(listing,w);
-        if(!assessment)continue;
+      // Re-evaluate every active watchlist: an updated listing that no longer fits loses its old match.
+      for(const w of allWatches){
+        const assessment=w.sourceList.includes(item.source)&&matchesWatchlist(listing,w)?scoreListing(listing,w):null;
+        if(!assessment){dropMatch.run(id,w.id);continue;}
         upsertMatch.run(id,w.id,JSON.stringify(assessment),seenAt); matched++;
       }
     }
@@ -116,10 +124,10 @@ export function ingestListings(db,items){
   return {fetched:items.length,inserted,matched,priceChanges};
 }
 export function listDeals(db,{mode='all',source='all',watchlistId=null,limit=100}={}){
-  const rows=db.prepare(`SELECT l.*,m.assessment,w.name AS watchlist_name,w.id AS watchlist_id, w.max_working,w.max_defect,w.expected_resale,w.repair_budget
+  const rows=db.prepare(`SELECT l.*,m.assessment,w.name AS watchlist_name,w.id AS watchlist_id, w.max_working,w.max_defect,w.expected_resale,w.repair_budget,w.allow_unknown_shipping
     FROM matches m JOIN listings l ON l.id=m.listing_id JOIN watchlists w ON w.id=m.watchlist_id
     WHERE w.active=1 ORDER BY l.first_seen_at DESC LIMIT 500`).all();
-  return rows.map(r=>({...publicListing(r),assessment:scoreListing(publicListing(r),{maxWorking:r.max_working,maxDefect:r.max_defect,expectedResale:r.expected_resale,repairBudget:r.repair_budget}),watchlistName:r.watchlist_name,watchlistId:r.watchlist_id})).filter(r=>r.assessment)
+  return rows.map(r=>({...publicListing(r),assessment:scoreListing(publicListing(r),{maxWorking:r.max_working,maxDefect:r.max_defect,expectedResale:r.expected_resale,repairBudget:r.repair_budget,allowUnknownShipping:!!r.allow_unknown_shipping}),watchlistName:r.watchlist_name,watchlistId:r.watchlist_id})).filter(r=>r.assessment)
     .filter(r=>(source==='all'||r.source===source)&&(watchlistId===null||r.watchlistId===watchlistId)&&(mode==='all'||(mode==='schnapper'&&r.assessment.alerts.includes('SCHNAPPER'))||(mode==='deal'&&r.assessment.alerts.includes('DEAL'))||(mode==='repair'&&['defect','unknown'].includes(r.assessment.health))))
     .sort((a,b)=>b.assessment.priority-a.assessment.priority || b.firstSeenAt.localeCompare(a.firstSeenAt)).slice(0,limit);
 }

@@ -26,8 +26,11 @@ Für eine passwortgeschützte Instanz `APP_PASSWORD` (mindestens 16 Zeichen), `S
 
 - Responsive Single-User-Dashboard, Feed nach Quelle, Schnappern, Preisalarmen und Repair-Fällen filterbar
 - Suchprofile anlegen/pausieren/löschen; separate Kaufgrenzen für intakt/defekt, optionale Wiederverkaufsschätzung und Reparaturbudget
+- GPU-Modellerkennung mit 49 Profilen aus `gpu-search` (Aliase, Ausschluss-Aliase, VRAM-Varianten): „RTX 4070 Super“ trifft keine 4070 Ti Super, „RTX 3060 12GB“ keine 8-GB-Karte. Zubehör (Lüfter, Halterungen, Wasserkühler, Kabel, Kartons, Displays), Komplett-PCs/Laptops und Platinen ohne Chip werden ausgeschlossen. Suchprofile mit einem bekannten Modell nutzen dieses Matching, freie Suchbegriffe den Textvergleich.
 - Deterministische Zustands-/Symptomerkennung und erklärbarer, bewusst vorsichtiger Reparaturscore
 - Separate Flags für frisch entdeckt (`SCHNAPPER`), Preisvorteil gegenüber **deiner Kaufgrenze** (`DEAL`) und Defektchance (`REPAIR`)
+- Unbekannte Versandkosten zählen nicht als 0 €: kein `DEAL`/`SCHNAPPER`, stattdessen „Preis prüfen“ – außer das Suchprofil akzeptiert unbekannten Versand (Abholung)
+- eBay-Auktionen werden mit abgefragt; ein aktuelles Gebot zählt erst in den letzten 5 Stunden vor Ende als Deal
 - SQLite: Upserts pro Quelle und Inserats-ID, Preisänderungs-Historie, erster/letzter Fund, Favoriten
 - eBay Browse OAuth-Adapter (API-Schlüssel erforderlich) und Kleinanzeigen Agent REST-Adapter (explizit risikobehaftete Drittanbieter-Quelle; Schlüssel und Freigabe erforderlich)
 - Facebook Marketplace ausschließlich über manuellen JSON-Testdatenimport. Keine ungeprüfte automatische Datenbeschaffung
@@ -82,7 +85,7 @@ PROVIDER_DAILY_CALL_LIMIT=200
 
 Live abgefragt werden nur Quellen in `APPROVED_PROVIDERS`, und erst nach dokumentiertem GO laut [`docs/decisions/001-provider-policy.md`](docs/decisions/001-provider-policy.md). Konfigurierte, aber nicht freigegebene Quellen erscheinen in der UI als „nicht freigegeben“. Facebook ist nie live. Ab `PROVIDER_DAILY_CALL_LIMIT` Abfragen pro Quelle und UTC-Tag sendet der Scan keine Requests mehr.
 
-Die App startet in diesem Modus nur mit `APP_PASSWORD`. In einer lokalen passwortgeschützten Instanz stehen die Suchprofile als Startkonfiguration bereit. `scan` kann über die UI manuell gestartet werden. eBay-API-Limits und Bedingungen beachten. Die Suchkosten sind im MVP noch **ein Request pro Suchbegriff**, die 5 Buckets aus `gpu-search` werden in Phase 2 portiert.
+Die App startet in diesem Modus nur mit `APP_PASSWORD`. In einer lokalen passwortgeschützten Instanz stehen die Suchprofile als Startkonfiguration bereit. `scan` kann über die UI manuell gestartet werden. eBay-API-Limits und Bedingungen beachten. Suchprofile mit bekanntem GPU-Modell teilen sich sechs breite eBay-Such-Buckets (z. B. „NVIDIA Ada“) mit je 200 Treffern inkl. Auktionen; die Zuordnung zum Profil passiert lokal. Freie Suchbegriffe kosten weiterhin einen Request pro Begriff.
 
 ### Facebook JSON-Import-Beispiel
 
@@ -96,9 +99,19 @@ Nur `https://facebook.com` und die gebräuchlichen Subdomains werden angenommen.
 
 ## Was fehlt bewusst noch?
 
-Produktionsfähiger mehrinstanzfähiger Betrieb (Postgres/Worker/Redis), serverseitige Web-Push-Benachrichtigungen auch bei geschlossenem Browser, echte marktplatzübergreifende Angebots-Dubletten, echte Marktpreise und Preistrends, GPU-VRAM-Variantenparsing aus dem Altprojekt, Auth per OIDC/Passkey, saubere Metrik-Erfassung für Latenz und Coverage, API-Anbieter-Abnahme. Für den Beta-Betrieb ist außerdem ein Security Review notwendig.
+Produktionsfähiger mehrinstanzfähiger Betrieb (Postgres/Worker/Redis), serverseitige Web-Push-Benachrichtigungen auch bei geschlossenem Browser, echte marktplatzübergreifende Angebots-Dubletten, echte Marktpreise und Preistrends, Auth per OIDC/Passkey, saubere Metrik-Erfassung für Latenz und Coverage, API-Anbieter-Abnahme. Für den Beta-Betrieb ist außerdem ein Security Review notwendig.
 
 Die Roadmap und Abnahmekriterien stehen in [`docs/MVP_UMSETZUNGSPLAN.md`](docs/MVP_UMSETZUNGSPLAN.md).
+
+## Entwicklung
+
+```bash
+npm ci
+npm run lint
+npm test
+```
+
+CI (`.github/workflows/ci.yml`) führt Lint und Tests bei jedem Push/PR aus und scannt die Historie mit gitleaks nach Secrets. Regressionsfälle für Modell-/Zubehörerkennung stehen in `fixtures/gpu-listings.json`, neue Fehltreffer dort ergänzen.
 
 ## API-Oberfläche
 

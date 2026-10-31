@@ -1,16 +1,14 @@
 /** Deterministic, explainable MVP rules. Prices represent USER limits, not market averages. */
+import { detectModel, exclusionReason, resolveWatchTargets } from './gpu.js';
 const defectSignals = [
-  /\bdefekt\b/i, /\bkaputt\b/i, /\bbastler(?:ware|gerät|karte)?\b/i,
-  /\bkein(?:e[nrms]?)?\s+(?:bild|signal)\b/i, /\bno\s+(?:display|signal)\b/i,
+  /\bdefekt\b/i, /\bkaputt\b/i, /\bbastler(?:ware|gerät|karte)?\b/i, /\b(?:für|zum)\s+basteln\b/i,
+  /\bkein(?:e[nrms]?)?\s+(?:bild|signal)\b/i, /\bno\s+(?:display|signal|post)\b/i,
   /\bartefakte?\b/i, /\b(?:artifacts?|reparaturbedürftig|fehlerhaft)\b/i,
-  /\b(?:doesn.t work|not working|for parts)\b/i,
+  /\b(?:doesn.t work|not working|for parts|ersatzteile?|nicht funktionsfähig)\b/i,
+  /\b(?:wasserschaden|water damage|brandschaden|verschmort|verbrannt|pcb gebrochen|broken pcb|cracked pcb)\b/i,
+  /\b(?:startet|bootet)\s+nicht\b/i, /\b(?:black screen|schwarzer bildschirm|kurzschluss|short circuit|bios defekt)\b/i,
 ];
-const uncertainSignals = [/\bungetestet\b/i, /\buntested\b/i, /\bungeprüft\b/i, /\bzustand unbekannt\b/i];
-const accessorySignals = [
-  /\b(?:leerkarton|nur ovp|box only|empty box)\b/i,
-  /\b(?:kühler|wasserkühl(?:er|ung)|waterblock|heatsink|riser|netzteil)\b/i,
-  /\b(?:gaming pc|komplettrechner|laptop|notebook|mainboard)\b/i,
-];
+const uncertainSignals = [/\bungetestet\b/i, /\buntested\b/i, /\bungeprüft\b/i, /\bnicht getestet\b/i, /\bzustand unbekannt\b/i, /\bohne kühler\b/i, /\bkühlerlos\b/i];
 const repairPositive = [
   { pattern:/\b(?:kein bild|no display|no signal|kein signal)\b/i, weight:14, reason:'Kein Bild – Fehlerbild eingegrenzt' },
   { pattern:/\b(?:artefakte|artifacts?)\b/i, weight:10, reason:'Artefakte – Fehlerbild beschrieben' },
@@ -29,7 +27,7 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo,v));
 const num = value => Number.isFinite(Number(value)) && value !== null && value !== '' ? Number(value) : null;
 export function classify(listing) {
   const text = `${listing.title || ''} ${listing.description || ''} ${listing.condition || ''}`;
-  if (accessorySignals.some(rx=>rx.test(listing.title || ''))) return 'excluded';
+  if (exclusionReason(listing)) return 'excluded';
   if (defectSignals.some(rx=>rx.test(text))) return 'defect';
   if (uncertainSignals.some(rx=>rx.test(text))) return 'unknown';
   return 'working';
@@ -44,18 +42,17 @@ export function repairAssessment(listing) {
   return { score: clamp(score,0,100), confidence: reasons.length >= 3 ? 'mittel' : 'niedrig', reasons: reasons.length ? reasons : ['Nur grobe Textbewertung; kein Funktionstest'] };
 }
 export function matchesWatchlist(listing, watchlist) {
-  const title = String(listing.title || '').toLocaleLowerCase('de-DE');
-  const query = String(watchlist.query || '').toLocaleLowerCase('de-DE').trim();
-  if (!query) return false;
-  // Prevent substring false positives: RTX 3080 should not match RTX 3080 Ti.
-  const tokens = query.match(/[a-z0-9]+/g) || [];
-  const titleTokens = title.match(/[a-z0-9]+/g) || [];
-  if (!tokens.every(token=>titleTokens.includes(token))) return false;
-  // Keep distinct model variants separate (3080 != 3080 Ti, 4070 != 4070 Super).
-  if (/\b(?:rtx|rx)\s+\d{4}\b/.test(query) && !/\b(?:ti|super|xt|xtx|gre)\b/.test(query)) {
-    if (/\b(?:ti|super|xt|xtx|gre)\b/.test(title)) return false;
+  const targets = resolveWatchTargets(watchlist.query);
+  if (targets) {
+    // Known GPU model: compare detected profile/VRAM, never plain substrings (4070 Super != 4070 Ti Super).
+    const model = detectModel(listing);
+    if (!model) return false;
+    return model.profile ? targets.profiles.has(model.profile) : targets.families.has(model.family);
   }
-  return true;
+  // Free-text query (no GPU profile): all query tokens must appear in the title.
+  const tokens = String(watchlist.query || '').toLocaleLowerCase('de-DE').match(/[a-z0-9]+/g) || [];
+  const titleTokens = String(listing.title || '').toLocaleLowerCase('de-DE').match(/[a-z0-9]+/g) || [];
+  return tokens.length > 0 && tokens.every(token=>titleTokens.includes(token));
 }
 export function scoreListing(listing, watchlist, now=new Date()) {
   const health=classify(listing);
@@ -63,7 +60,15 @@ export function scoreListing(listing, watchlist, now=new Date()) {
   const price = num(listing.priceEur);
   if (price === null || price < 0 || (price === 0 && !/zu verschenken|gratis|kostenlos/i.test(listing.title || ''))) return null;
   const shipping = num(listing.shippingEur);
+  // Unknown shipping is not 0 €: allIn is then only a lower bound.
   const allIn = price + (shipping ?? 0);
+  const knownTotalEur = shipping === null ? null : allIn;
+  const costsConfirmed = shipping !== null || !!watchlist.allowUnknownShipping;
+  const isAuction = listing.offerType === 'AUCTION';
+  const endsAt = listing.auctionEndsAt && Number.isFinite(Date.parse(listing.auctionEndsAt)) ? Date.parse(listing.auctionEndsAt) : null;
+  const auctionMinutesLeft = endsAt === null ? null : Math.round((endsAt-now.getTime())/60000);
+  // A current bid is not a price: auctions only count shortly before their end (gpu-search: 5 h).
+  const priceFinal = !isAuction || (auctionMinutesLeft !== null && auctionMinutesLeft > 0 && auctionMinutesLeft <= 300);
   const ceiling = health === 'defect' ? num(watchlist.maxDefect) : num(watchlist.maxWorking);
   const discountPct = ceiling && ceiling > 0 ? Math.round((ceiling-allIn)/ceiling*100) : null;
   const repair = health === 'defect' ? repairAssessment(listing) : null;
@@ -77,15 +82,17 @@ export function scoreListing(listing, watchlist, now=new Date()) {
   const ageMinutes = effectiveTime === null ? null : Math.floor(Math.max(0,now.getTime()-effectiveTime)/60000);
   const isFresh = ageMinutes !== null && ageMinutes <= 12;
   const withinLimit = ceiling !== null && ceiling > 0 && allIn <= ceiling;
-  const isDeal = withinLimit && (discountPct ?? 0) >= 12;
+  const isDeal = withinLimit && costsConfirmed && priceFinal && (discountPct ?? 0) >= 12;
   const isRepair = health === 'defect' && (withinLimit || (profitEstimate !== null && profitEstimate >= 25));
-  const isSchnapper = isFresh && withinLimit;
+  const isSchnapper = isFresh && withinLimit && costsConfirmed && priceFinal;
+  const needsPriceCheck = withinLimit && !costsConfirmed;
   // Alerts are separate: new, price bargain, repair opportunity, not just cheap offers.
   const alerts = [ ...(isSchnapper?['SCHNAPPER']:[]), ...(isDeal?['DEAL']:[]), ...(isRepair?['REPAIR']:[]) ];
   const reasons=[];
   if (isFresh) reasons.push(`Neu seit ca. ${ageMinutes} Min. (${publishedAt ? 'Inseratszeit' : 'erstmals entdeckt'})`);
-  if (discountPct !== null) reasons.push(`${discountPct >= 0 ? discountPct + '% unter' : Math.abs(discountPct) + '% über'} deiner Kaufgrenze`);
-  if (shipping === null) reasons.push('Versandkosten unbekannt');
+  if (discountPct !== null) reasons.push(`${discountPct >= 0 ? discountPct + '% unter' : Math.abs(discountPct) + '% über'} deiner Kaufgrenze${shipping === null ? ' (ohne Versand)' : ''}`);
+  if (shipping === null) reasons.push(needsPriceCheck ? 'Versandkosten unbekannt – Gesamtpreis prüfen' : 'Versandkosten unbekannt');
+  if (isAuction) reasons.push(`Auktion: aktuelles Gebot${listing.bidCount != null ? `, ${listing.bidCount} Gebote` : ''}${auctionMinutesLeft === null ? ', Ende unbekannt' : auctionMinutesLeft > 0 ? `, endet in ${auctionMinutesLeft < 120 ? auctionMinutesLeft + ' Min.' : Math.round(auctionMinutesLeft/60) + ' Std.'}` : ', beendet'}`);
   if (health==='unknown') reasons.push('Zustand nicht bestätigt');
   if (repair && repair.score < 30) reasons.push('Hohes Reparaturrisiko');
   if (profitEstimate !== null) reasons.push(`Rechnerische Marge ${profitEstimate.toFixed(2)} € (Schätzung)`);
@@ -93,7 +100,9 @@ export function scoreListing(listing, watchlist, now=new Date()) {
   const pricePart = clamp(discountPct ?? 0, -30, 60)*0.75;
   const repairPart = isRepair ? (repair.score/100)*18 : 0;
   const priority = Math.round(clamp(25+recency+pricePart+repairPart,0,100));
-  return {health, allIn, shippingKnown: shipping !== null, discountPct, ageMinutes,
+  const model = detectModel(listing);
+  return {health, model: model?.model ?? null, vramGb: model?.vramGb ?? null, allIn, knownTotalEur, shippingKnown: shipping !== null, needsPriceCheck,
+    offerType: listing.offerType ?? 'FIXED_PRICE', auctionMinutesLeft, discountPct, ageMinutes,
     timestampBasis:publishedAt?'published':firstSeenAt?'first-seen':'unknown',
     repairScore:repair?.score ?? null, repairConfidence:repair?.confidence ?? null,
     repairReasons:repair?.reasons ?? [], profitEstimate, alerts, reasons, priority,
