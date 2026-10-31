@@ -48,9 +48,14 @@ Für eine passwortgeschützte Instanz `APP_PASSWORD` (mindestens 16 Zeichen), `S
 ### Provider technisch prüfen
 
 ```bash
-# Kein Netzaufruf, keine Kosten:
+# Kein Netzaufruf, keine Kosten – zeigt nur die geplanten Calls:
+npm run probe -- ebay
 npm run probe -- kleinanzeigen
 npm run probe -- facebook
+
+# eBay-Live-Probe (DF-002): 3 Queries × Sofortkauf/Auktion × 2 Wiederholungen = 12 Calls
+EBAY_APP_ID='...' EBAY_CLIENT_SECRET='...' npm run probe -- ebay --live
+# Optional: PROBE_QUERIES='RTX 4070 Super|RTX 5080' PROBE_REPEAT=3 PROBE_MAX_CALLS=20
 
 # NUR nach ausdrücklicher Kosten-/Rechtsfreigabe und API-Key-Konfiguration:
 KLAZ_API_KEY='...' PROBE_QUERY='RTX 4070 Super' npm run probe -- kleinanzeigen --live
@@ -61,7 +66,7 @@ APIFY_TOKEN='...' FB_ACTOR_ID='anbieter/actor' FB_ACTOR_INPUT_JSON='{"searchQuer
   npm run probe -- facebook --live
 ```
 
-Ein Probe-Lauf berichtet erfolgreiche Datensätze, Laufzeit, Feldvollständigkeit, neue Inserate, doppelte IDs und Beispieldaten. **Er ist noch kein Nachweis für Geschwindigkeit oder Zuverlässigkeit**: Dafür braucht es mindestens 24–72 Stunden wiederholte Testabfragen mit Benchmarks, Budgetgrenzen und Vergleich zu manueller Stichprobe. Apify-Actors haben unterschiedliche Eingabe-/Ausgabe-Schemas; Anpassung und Mapping können notwendig sein.
+Ein Probe-Lauf bricht vor dem ersten Request ab, wenn die geplanten Calls `PROBE_MAX_CALLS` (Standard 12) überschreiten. Er schreibt jeden Call als JSONL nach `data/probes/<provider>-YYYY-MM-DD.jsonl` (ohne Secrets, Beschreibungen oder Verkäuferdaten) und fasst Erfolgsquote, p50/p95-Latenz, Validität, stabile IDs, fehlende Veröffentlichungszeit, Angebotstypen und Fehler zusammen. **Er ist noch kein Nachweis für Geschwindigkeit oder Zuverlässigkeit**: Dafür braucht es mindestens 24–72 Stunden wiederholte Testabfragen mit Benchmarks, Budgetgrenzen und Vergleich zu manueller Stichprobe. Apify-Actors haben unterschiedliche Eingabe-/Ausgabe-Schemas; Anpassung und Mapping können notwendig sein.
 
 ### eBay-Live-Suche aktivieren
 
@@ -71,7 +76,11 @@ EBAY_APP_ID=...
 EBAY_CLIENT_SECRET=...
 ENABLE_SCHEDULER=true
 POLL_INTERVAL_SECONDS=300
+APPROVED_PROVIDERS=ebay
+PROVIDER_DAILY_CALL_LIMIT=200
 ```
+
+Live abgefragt werden nur Quellen in `APPROVED_PROVIDERS`, und erst nach dokumentiertem GO laut [`docs/decisions/001-provider-policy.md`](docs/decisions/001-provider-policy.md). Konfigurierte, aber nicht freigegebene Quellen erscheinen in der UI als „nicht freigegeben“. Facebook ist nie live. Ab `PROVIDER_DAILY_CALL_LIMIT` Abfragen pro Quelle und UTC-Tag sendet der Scan keine Requests mehr.
 
 Die App startet in diesem Modus nur mit `APP_PASSWORD`. In einer lokalen passwortgeschützten Instanz stehen die Suchprofile als Startkonfiguration bereit. `scan` kann über die UI manuell gestartet werden. eBay-API-Limits und Bedingungen beachten. Die Suchkosten sind im MVP noch **ein Request pro Suchbegriff**, die 5 Buckets aus `gpu-search` werden in Phase 2 portiert.
 

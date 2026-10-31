@@ -16,3 +16,15 @@ test('Facebook import rejects non-Facebook URL',()=>{
 test('Unverified Facebook live integration is never marked ready',()=>{
  assert.equal(providerReady({ebayAppId:'a',ebayClientSecret:'b',klazKey:''}).facebook.ready,false);
 });
+test('eBay offer type distinguishes auctions from fixed price',()=>{
+ const base={itemId:'2',title:'RTX 5080',itemWebUrl:'https://www.ebay.de/itm/2',price:{value:'500'}};
+ assert.equal(normalizeEbay({...base,buyingOptions:['AUCTION'],itemEndDate:'2026-11-01T10:00:00Z',bidCount:3}).offerType,'AUCTION');
+ assert.equal(normalizeEbay({...base,buyingOptions:['FIXED_PRICE','BEST_OFFER']}).offerType,'FIXED_PRICE');
+});
+test('Configured but unapproved providers never go live',()=>{
+ const cfg={ebayAppId:'a',ebayClientSecret:'b',klazKey:'k'};
+ assert.equal(providerReady(cfg).ebay.live,false);
+ assert.equal(providerReady(cfg).kleinanzeigen.live,false);
+ const approved=providerReady({...cfg,approvedProviders:['ebay','facebook']});
+ assert.equal(approved.ebay.live,true);assert.equal(approved.kleinanzeigen.live,false);assert.equal(approved.facebook.live,false);
+});

@@ -18,4 +18,7 @@ export const config = {
   klazKey: process.env.KLAZ_API_KEY || '',
   klazLocationId: process.env.KLAZ_LOCATION_ID || '',
   klazRadiusKm: process.env.KLAZ_RADIUS_KM || '',
+  // Live polling only for sources with a documented GO (docs/decisions/001-provider-policy.md).
+  approvedProviders: (process.env.APPROVED_PROVIDERS || '').split(',').map(x=>x.trim()).filter(Boolean),
+  dailyCallLimit: positiveInt('PROVIDER_DAILY_CALL_LIMIT', 200, 1, 100000),
 };

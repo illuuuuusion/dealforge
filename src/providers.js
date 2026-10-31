@@ -30,11 +30,14 @@ export function normalizeEbay(row){
   if(!id||!url||!Number.isFinite(price)|| (row.price?.currency && row.price.currency!=='EUR'))return null;
   return {source:'ebay',externalId:String(id),title:row.title||'',description:row.shortDescription||'',
     url, imageUrl:row.image?.imageUrl??null,priceEur:price,shippingEur:sumShipping(row),
-    condition:row.condition||'',publishedAt:row.itemOriginDate||null};
+    condition:row.condition||'',publishedAt:row.itemOriginDate||null,
+    offerType:row.buyingOptions?.includes('AUCTION')?'AUCTION':row.buyingOptions?.includes('FIXED_PRICE')?'FIXED_PRICE':'OTHER',
+    auctionEndsAt:row.itemEndDate??null,bidCount:row.bidCount??null};
 }
-export async function fetchEbay(query,cfg){
+export async function fetchEbay(query,cfg,{auction=false}={}){
   const token=await getEbayToken(cfg);
   const params=new URLSearchParams({q:query,limit:'50',sort:'newlyListed'});
+  if(auction)params.set('filter','buyingOptions:{AUCTION}');
   const payload=await jsonFetch(`https://api.ebay.com/buy/browse/v1/item_summary/search?${params}`,{
     headers:{'Authorization':`Bearer ${token}`,'X-EBAY-C-MARKETPLACE-ID':'EBAY_DE','Accept-Language':'de-DE'}});
   return (payload.itemSummaries||[]).map(normalizeEbay).filter(Boolean);
@@ -75,11 +78,17 @@ export function normalizeFacebook(row) {
     priceEur:Number(price),shippingEur:null,condition:first(row.condition,null),
     publishedAt:first(row.createdAt,row.created_at,row.listedAt,row.publishedAt,null)};
 }
-export const providerReady = cfg=>({
-  ebay:{ready:!!(cfg.ebayAppId && cfg.ebayClientSecret),kind:'official',status:'Konfigurierbar per OAuth'},
-  kleinanzeigen:{ready:!!cfg.klazKey,kind:'third-party',status:'Beta: Freigabe und Live-Probe erforderlich'},
-  facebook:{ready:false,kind:'manual-import',status:'Nur Import, API-Anbieter noch nicht abgenommen'}
-});
+/** ready = credentials present; approved = documented GO; only both together allow live calls. */
+export const providerReady = cfg=>{
+  const approved=name=>!!cfg.approvedProviders?.includes(name);
+  const entry=(ready,name,kind,status)=>({ready,approved:approved(name),live:ready&&approved(name),kind,status});
+  return {
+    ebay:entry(!!(cfg.ebayAppId && cfg.ebayClientSecret),'ebay','official','Offizielle Browse API · Live-Probe DF-002 offen'),
+    kleinanzeigen:entry(!!cfg.klazKey,'kleinanzeigen','third-party','Drittanbieter · NO GO bis Nutzungsfreigabe'),
+    // Facebook is import-only: never live, regardless of APPROVED_PROVIDERS.
+    facebook:{ready:false,approved:false,live:false,kind:'manual-import',status:'Nur manueller Import · NO GO für Live-Suche'}
+  };
+};
 export async function fetchSource(source,query,cfg){
   if(source==='ebay')return fetchEbay(query,cfg);
   if(source==='kleinanzeigen')return fetchKleinanzeigen(query,cfg);

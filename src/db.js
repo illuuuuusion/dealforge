@@ -126,6 +126,10 @@ export function listDeals(db,{mode='all',source='all',watchlistId=null,limit=100
 export function setListingStatus(db,id,status){if(!['new','saved','dismissed','contacted'].includes(status))throw Error('Ungültiger Status');return db.prepare('UPDATE listings SET status=? WHERE id=?').run(status,id).changes>0;}
 export function listStats(db){const r=db.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN status='saved' THEN 1 ELSE 0 END) AS saved FROM listings`).get();
  const r2=db.prepare(`SELECT COUNT(DISTINCT listing_id) AS n FROM matches WHERE json_extract(assessment,'$.health') IN ('defect','unknown')`).get();
- const s=db.prepare(`SELECT source,MAX(happened_at) AS last_run,SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS errors FROM source_runs GROUP BY source`).all();
+ const s=db.prepare(`SELECT source,MAX(happened_at) AS last_run,SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END) AS errors,
+   SUM(CASE WHEN substr(happened_at,1,10)=? THEN 1 ELSE 0 END) AS calls_today,
+   (SELECT message FROM source_runs r WHERE r.source=source_runs.source AND ok=0 ORDER BY id DESC LIMIT 1) AS last_error
+   FROM source_runs GROUP BY source`).all(now().slice(0,10));
  return {total:r.total,saved:r.saved||0,repairCandidates:r2.n||0,sources:s};}
+export function providerCallsToday(db,source){return db.prepare('SELECT COUNT(*) AS n FROM source_runs WHERE source=? AND substr(happened_at,1,10)=?').get(source,now().slice(0,10)).n;}
 export function logSourceRun(db,source,result,error=null){db.prepare('INSERT INTO source_runs(source,ok,fetched,inserted,message,happened_at) VALUES(?,?,?,?,?,?)').run(source,error?0:1,result?.fetched??0,result?.inserted??0,error?String(error).slice(0,200):null,now());}

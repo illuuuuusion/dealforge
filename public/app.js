@@ -45,7 +45,10 @@ async function loadState(){
   $('#watch-filter').innerHTML='<option value="">Alle Profile</option>'+state.watchlists.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');
   $('#watch-filter').value=selected;
   $('#watchlist').innerHTML=state.watchlists.map(x=>`<div class="watch-item ${x.active?'':'inactive'}"><div><strong>${esc(x.name)}</strong><p>${eur(x.maxWorking)} intakt · ${eur(x.maxDefect)} defekt · ${esc(x.sourceList.map(s=>names[s]).join(', '))}</p></div><div class="watch-buttons"><button title="Aktivieren/deaktivieren" data-watch="toggle" data-active="${x.active}" data-id="${x.id}">${x.active?'◉':'○'}</button><button title="Löschen" data-watch="delete" data-id="${x.id}">✕</button></div></div>`).join('');
-  $('#provider-list').innerHTML=Object.entries(state.providers).map(([name,v])=>`<div class="provider"><div><strong>${esc(names[name])}</strong><small>${esc(v.status)}</small></div><span class="status ${v.ready?'ok':''}">${v.ready?'● KONFIGURIERT':name==='facebook'?'○ IMPORT':'○ OFFLINE'}</span></div>`).join('');
+  $('#provider-list').innerHTML=Object.entries(state.providers).map(([name,v])=>{const u=state.stats.sources.find(s=>s.source===name);
+    const label=v.live?'● LIVE':name==='facebook'?'○ IMPORT':!v.approved?'○ NICHT FREIGEGEBEN':'○ KEIN ZUGANG';
+    const usage=name==='facebook'?'':`<small>Heute ${u?.calls_today??0}/${state.dailyCallLimit} Abfragen · letzter Lauf ${esc(u?timeAgo(u.last_run):'nie')} · ${u?.errors??0} Fehler${u?.last_error?` (zuletzt: ${esc(u.last_error.slice(0,80))})`:''}</small>`;
+    return `<div class="provider"><div><strong>${esc(names[name])}</strong><small>${esc(v.status)}</small>${usage}</div><span class="status ${v.live?'ok':''}">${label}</span></div>`;}).join('');
 }
 async function refresh(notify=false){if(busy)return;busy=true;try{await loadState();await loadFeed({notify});}catch(e){if(e.message!=='Bitte anmelden')toast(e.message);}finally{busy=false;}}
 $('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/login',{method:'POST',data:{password:$('#password').value}});$('#login').hidden=true;$('#password').value='';await refresh();}catch(ex){$('#login-error').textContent=ex.message;}});
