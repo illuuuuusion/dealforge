@@ -32,13 +32,14 @@ DealForge bezieht Inserate von eBay, Kleinanzeigen und Facebook Marketplace. Tec
 
 ## Quellen
 
-### eBay – Status: `PENDING` (Ziel `GO` nach DF-002)
+### eBay – Status: `GO LIMITED` (Standardquelle; Bericht [`ebay-2026-10-31`](../provider-evaluation/ebay-2026-10-31.md))
 
 - **Zugang:** offizielle Browse API `GET /buy/browse/v1/item_summary/search` mit OAuth Client Credentials und `EBAY_DE`.
 - **Erlaubnis:** offizielles Developer Program; die API License Agreement gilt. Vor dem `GO` werden Retention und Anzeigeregeln geprüft.
 - **Datenschutz:** nur Inseratsdaten speichern, keine Verkäuferdaten außer dem Nötigsten.
 - **Limit:** Tageskontingent der Anwendung laut Developer-Portal (Analytics/Rate Limits) prüfen. App-seitig gilt zusätzlich `PROVIDER_DAILY_CALL_LIMIT`.
-- **Offen:** Live-Test mit 3 Queries, jeweils Sofortkauf und Auktion (`filter=buyingOptions:{AUCTION}`). Abnahme: mindestens ein gültiger `FIXED_PRICE`- und ein `AUCTION`-Treffer, Original-Link stimmt.
+- **DF-002 erledigt (31.10.2026):** 12/12 Calls erfolgreich, 100 % valide, Sofortkauf- und Auktionstreffer, Links korrekt.
+- **Offen bis `GO`:** Freshness-Benchmark über 24–72 h und Bestätigung der API License Agreement.
 - **Alternativen:** keine nötig. eBay ist der bevorzugte erste Live-Provider.
 
 ### Kleinanzeigen (über Kleinanzeigen Agent) – Status: `NO GO` (bis Freigabe)
@@ -69,6 +70,6 @@ DealForge bezieht Inserate von eBay, Kleinanzeigen und Facebook Marketplace. Tec
 
 ## Konsequenzen
 
-- Nach dem Update ruft auch ein konfigurierter eBay-Zugang nichts mehr ab, solange `APPROVED_PROVIDERS` leer ist.
+- Ohne `APPROVED_PROVIDERS=ebay` ruft auch ein konfigurierter eBay-Zugang nichts ab.
 - Der MVP darf nur mit eBay live gehen. Kleinanzeigen und Facebook dürfen dauerhaft auf NO GO bleiben.
 - Monatsbudgets, Budgets pro Suchfilter und `provider_configs` in der Datenbank folgen mit dem Worker (DF-206).

@@ -83,7 +83,7 @@ export const providerReady = cfg=>{
   const approved=name=>!!cfg.approvedProviders?.includes(name);
   const entry=(ready,name,kind,status)=>({ready,approved:approved(name),live:ready&&approved(name),kind,status});
   return {
-    ebay:entry(!!(cfg.ebayAppId && cfg.ebayClientSecret),'ebay','official','Offizielle Browse API · Live-Probe DF-002 offen'),
+    ebay:entry(!!(cfg.ebayAppId && cfg.ebayClientSecret),'ebay','official','Offizielle Browse API · GO LIMITED (Standardquelle)'),
     kleinanzeigen:entry(!!cfg.klazKey,'kleinanzeigen','third-party','Drittanbieter · NO GO bis Nutzungsfreigabe'),
     // Facebook is import-only: never live, regardless of APPROVED_PROVIDERS.
     facebook:{ready:false,approved:false,live:false,kind:'manual-import',status:'Nur manueller Import · NO GO für Live-Suche'}
