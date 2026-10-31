@@ -1,11 +1,11 @@
 FROM node:22-alpine
 WORKDIR /app
-COPY package.json ./
-COPY src ./src
-COPY public ./public
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable
+COPY . .
+# ponytail: single stage incl. dev dependencies; split into build/runtime stages when image size matters.
+RUN pnpm install --frozen-lockfile && pnpm build && chown -R node:node /app
 EXPOSE 3000
-ENV HOST=0.0.0.0 PORT=3000 DB_PATH=/app/data/dealforge.sqlite DEMO_MODE=false
-RUN mkdir -p /app/data && chown -R node:node /app
-VOLUME /app/data
+ENV HOST=0.0.0.0 PORT=3000
 USER node
-CMD ["node","src/server.js"]
+CMD ["node", "apps/api/dist/main.js"]

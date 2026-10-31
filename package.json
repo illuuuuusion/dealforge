@@ -1,22 +1,33 @@
 {
   "name": "dealforge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Multi-marketplace deal finder for deals, fast finds and repair projects",
+  "packageManager": "pnpm@10.34.9",
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.18.0"
   },
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
-    "test": "node --test tests/*.test.js",
-    "probe": "node scripts/probe.js",
-    "lint": "eslint ."
+    "dev:api": "node --conditions=source --watch apps/api/src/main.ts",
+    "dev:worker": "node --conditions=source --watch apps/worker/src/main.ts",
+    "test": "NODE_OPTIONS=--conditions=source node --test --test-concurrency=4 'packages/*/test/*.test.ts' 'apps/*/test/*.test.ts' 'tests/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "pnpm -r run build",
+    "lint": "eslint .",
+    "probe": "node --conditions=source scripts/probe.ts",
+    "db": "node --conditions=source packages/db/src/cli.ts"
+  },
+  "dependencies": {
+    "@dealforge/db": "workspace:*",
+    "@dealforge/providers": "workspace:*"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
+    "@types/node": "22.20.5",
     "eslint": "9.39.5",
-    "globals": "16.5.0"
+    "globals": "16.5.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.1"
   }
 }

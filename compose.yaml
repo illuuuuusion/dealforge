@@ -1,24 +1,82 @@
+# Local stack: API, worker, PostgreSQL, Redis. Ports bind to 127.0.0.1 only.
+# Postgres/Redis ports are published for `pnpm test` and dev processes on the host.
+x-app-env: &app-env
+  DATABASE_URL: "postgres://dealforge:${POSTGRES_PASSWORD:-dealforge}@postgres:5432/dealforge"
+  REDIS_URL: "redis://redis:6379"
+  DEMO_MODE: "${DEMO_MODE:-false}"
+  ENABLE_SCHEDULER: "${ENABLE_SCHEDULER:-false}"
+  POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-300}"
+  APPROVED_PROVIDERS: "${APPROVED_PROVIDERS:-}"
+  PROVIDER_DAILY_CALL_LIMIT: "${PROVIDER_DAILY_CALL_LIMIT:-200}"
+  PROVIDER_MONTHLY_CALL_LIMIT: "${PROVIDER_MONTHLY_CALL_LIMIT:-5000}"
+  QUERY_DAILY_CALL_LIMIT: "${QUERY_DAILY_CALL_LIMIT:-100}"
+  EBAY_APP_ID: "${EBAY_APP_ID:-}"
+  EBAY_CLIENT_SECRET: "${EBAY_CLIENT_SECRET:-}"
+  KLAZ_API_KEY: "${KLAZ_API_KEY:-}"
+  KLAZ_LOCATION_ID: "${KLAZ_LOCATION_ID:-}"
+  KLAZ_RADIUS_KM: "${KLAZ_RADIUS_KM:-}"
+x-app: &app
+  build: .
+  restart: unless-stopped
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+
 services:
-  dealforge:
-    build: .
+  api:
+    <<: *app
     ports:
       - "127.0.0.1:3000:3000"
     environment:
+      <<: *app-env
       HOST: "0.0.0.0"
       PORT: "3000"
-      APP_PASSWORD: "${APP_PASSWORD:?APP_PASSWORD is required}"
-      SESSION_SECRET: "${SESSION_SECRET:?SESSION_SECRET is required}"
+      # The API refuses to start without an APP_PASSWORD of at least 16 characters.
+      APP_PASSWORD: "${APP_PASSWORD:-}"
+      SESSION_SECRET: "${SESSION_SECRET:-}"
       APP_ORIGIN: "${APP_ORIGIN:-http://localhost:3000}"
-      DEMO_MODE: "${DEMO_MODE:-false}"
-      ENABLE_SCHEDULER: "${ENABLE_SCHEDULER:-false}"
-      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-300}"
-      APPROVED_PROVIDERS: "${APPROVED_PROVIDERS:-}"
-      PROVIDER_DAILY_CALL_LIMIT: "${PROVIDER_DAILY_CALL_LIMIT:-200}"
-      EBAY_APP_ID: "${EBAY_APP_ID:-}"
-      EBAY_CLIENT_SECRET: "${EBAY_CLIENT_SECRET:-}"
-      KLAZ_API_KEY: "${KLAZ_API_KEY:-}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/v1/health/live"]
+      interval: 15s
+      timeout: 3s
     volumes:
-      - dealforge_db:/app/data
+      # Old SQLite prototype data, read-only, for `node packages/db/dist/cli.js import-sqlite /legacy/dealforge.sqlite`.
+      - dealforge_db:/legacy:ro
+  worker:
+    <<: *app
+    command: ["node", "apps/worker/dist/main.js"]
+    environment: *app-env
+  postgres:
+    image: postgres:16-alpine
     restart: unless-stopped
+    environment:
+      POSTGRES_USER: dealforge
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-dealforge}"
+      POSTGRES_DB: dealforge
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "dealforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # AOF persistence: queued jobs and the poll scheduler survive a Redis restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:56379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 volumes:
+  pgdata:
+  redisdata:
   dealforge_db:

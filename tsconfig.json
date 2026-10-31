@@ -1,0 +1,6 @@
+{
+  // Typecheck of the whole repo against package sources (no build needed).
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "noEmit": true, "declaration": false, "allowImportingTsExtensions": true, "customConditions": ["source"] },
+  "include": ["apps/*/src", "apps/*/test", "packages/*/src", "packages/*/test", "scripts", "tests"]
+}

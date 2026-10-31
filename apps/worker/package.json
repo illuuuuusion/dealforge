@@ -1,0 +1,16 @@
+{
+  "name": "@dealforge/worker",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@dealforge/config": "workspace:*",
+    "@dealforge/db": "workspace:*",
+    "@dealforge/jobs": "workspace:*",
+    "@dealforge/providers": "workspace:*",
+    "bullmq": "5.81.5"
+  }
+}

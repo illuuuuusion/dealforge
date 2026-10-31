@@ -1,0 +1,19 @@
+{
+  "name": "@dealforge/api",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@dealforge/config": "workspace:*",
+    "@dealforge/contracts": "workspace:*",
+    "@dealforge/db": "workspace:*",
+    "@dealforge/domain": "workspace:*",
+    "@dealforge/jobs": "workspace:*",
+    "@dealforge/providers": "workspace:*",
+    "fastify": "5.12.7",
+    "zod": "4.6.7"
+  }
+}
