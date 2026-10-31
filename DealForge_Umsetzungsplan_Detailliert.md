@@ -482,6 +482,13 @@ Der Server weist eine explizit nicht freigegebene Quelle mit einem verständlich
 
 **Definition of Done P1:** 40 oder mehr konkrete Titel-/Defekt-Fixtures; keine bekannten Modellvarianten-Fehltreffer in der Testliste. Bei aktualisierten Inseraten entstehen keine veralteten Matches. Bestehende 14 Tests bleiben grün.
 
+> **Randbedingung (Stand 31.10.2026): Es steht noch kein Server bereit.** DealForge läuft vorerst nur lokal auf dem Entwicklungsrechner, nicht 24/7 und ohne öffentliche HTTPS-URL. Alle folgenden Phasen müssen das berücksichtigen:
+> - Alles muss lokal per `docker compose up` (App, Worker, PostgreSQL, Redis) startbar und testbar sein; kein Schritt darf einen gehosteten Dienst voraussetzen.
+> - Dauerläufe (24h-Staging in P2, 24–72h-Frische-Benchmark für eBay) laufen lokal und lückenhaft. Ergebnisse als „lokal, nicht durchgehend“ kennzeichnen; das volle eBay-`GO` und Latenz-SLOs erst nach Server-Betrieb.
+> - Eingehende Provider-Webhooks (P3) brauchen eine öffentliche HTTPS-Adresse und sind bis dahin nicht testbar → nur Polling.
+> - Web Push (P3) lokal nur über `localhost` testen; Zustellung bei geschlossenem Browser erst mit Server.
+> - Deployment-Artefakte (Compose, Reverse Proxy, Backups) so vorbereiten, dass ein späterer Umzug auf einen VPS ohne Umbau möglich ist; P6 beginnt mit der Server-Bereitstellung.
+
 ### Phase P2 – Plattform-Backend, Datenpipeline und Dauerbetrieb (6–10 Arbeitstage)
 
 **Ziel:** Mehrere Quellen zuverlässig beobachten, ohne Datenverlust und ohne Kostenexplosion.
