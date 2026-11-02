@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createTestDb, seed, migrate, ingestListings, listDeals, watchlists, createWatchlist, updateWatchlist, deleteWatchlist,
-  getListing, reserveProviderCall, budgetExhausted, importSqlite, type Db } from '../src/index.ts';
+  getListing, reserveProviderCall, budgetExhausted, importSqlite, recentAlerts, alertsAfter, latestAlertId, type Db } from '../src/index.ts';
 
 let t: Awaited<ReturnType<typeof createTestDb>>, db: Db;
 before(async () => { t = await createTestDb(); db = t.db; await seed(db); });
@@ -100,6 +100,30 @@ test('DF-206: parallel reservations never overshoot the limit', async () => {
   const limits = { daily: 5, monthly: 100, perQueryDaily: 100 };
   const results = await Promise.all(Array.from({ length: 20 }, () => reserveProviderCall(db, 'kleinanzeigen', 'q', limits)));
   assert.equal(results.filter(r => r === null).length, 5);
+});
+
+test('DF-304/T-11/T-12: one first alert per kind, one PRICE_DROP per price level, replays add nothing', async () => {
+  const id = await createWatchlist(db, { name: 'Alerts 4070S', query: 'RTX 4070 Super', maxWorking: 470, maxDefect: 120, sourceList: ['ebay'] });
+  const row = { source: 'ebay', externalId: 'alert-1', title: 'MSI RTX 4070 Super Ventus 12GB', priceEur: 300, shippingEur: 5,
+    url: 'https://www.ebay.de/itm/alert-1', publishedAt: new Date().toISOString() };
+  const kinds = async () => (await recentAlerts(db, 200)).filter(a => a.url === row.url && a.watchlistId === id).map(a => a.kind).sort();
+  assert.ok((await ingestListings(db, [row])).alerts >= 2);
+  for (let i = 0; i < 3; i++) assert.equal((await ingestListings(db, [row])).alerts, 0);
+  assert.deepEqual(await kinds(), ['DEAL', 'SCHNAPPER']);
+  await ingestListings(db, [{ ...row, priceEur: 290 }]); // −3 %: below the drop threshold
+  await ingestListings(db, [{ ...row, priceEur: 250 }]);
+  await ingestListings(db, [{ ...row, priceEur: 250 }]);
+  assert.deepEqual(await kinds(), ['DEAL', 'PRICE_DROP', 'SCHNAPPER']);
+  const drop = (await recentAlerts(db, 200)).find(a => a.kind === 'PRICE_DROP' && a.watchlistId === id);
+  assert.match(drop?.reasons[0] ?? '', /von 290 € auf 250 €/);
+  const after = await alertsAfter(db, drop!.id - 1);
+  assert.equal(after[0].id, drop!.id);
+  // A new watchlist does not alert on old listings; deleting one keeps its alert history.
+  const before = await latestAlertId(db);
+  await createWatchlist(db, { name: 'Alerts 4070S #2', query: 'RTX 4070 Super', maxWorking: 470, maxDefect: 120, sourceList: ['ebay'] });
+  assert.equal(await latestAlertId(db), before);
+  await deleteWatchlist(db, id);
+  assert.equal((await recentAlerts(db, 200)).filter(a => a.url === row.url && a.watchlistId === null).length, 3);
 });
 
 test('Migrations are versioned and idempotent', async () => {

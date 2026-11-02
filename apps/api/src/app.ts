@@ -135,6 +135,33 @@ export function buildApp({ config, db, queues }: { config: Config; db: repo.Db; 
     return ok;
   });
 
+  app.get('/api/v1/alerts', async req => ({ items: await repo.recentAlerts(db, C.AlertsQuery.parse(req.query).limit) }));
+  // ponytail: each SSE client polls the alerts table every 2 s; LISTEN/NOTIFY once there are many clients.
+  const streams = new Set<() => void>();
+  app.addHook('preClose', async () => { for (const end of streams) end(); });
+  app.get('/api/v1/events', async (req, reply) => {
+    const resume = String(req.headers['last-event-id'] ?? '');
+    let last = /^\d{1,15}$/.test(resume) ? Number(resume) : await repo.latestAlertId(db), busy = false, idle = 0;
+    reply.hijack();
+    const res = reply.raw;
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', Connection: 'keep-alive' });
+    res.write('retry: 5000\n\n');
+    const tick = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const items = await repo.alertsAfter(db, last);
+        for (const a of items) { res.write(`id: ${a.id}\nevent: alert\ndata: ${JSON.stringify(a)}\n\n`); last = a.id; }
+        if (items.length) idle = 0; else if (++idle % 10 === 0) res.write(': ping\n\n');
+      } catch (e) { console.error('[events]', (e as Error).message); } finally { busy = false; }
+    };
+    const timer = setInterval(tick, 2000);
+    const end = () => { clearInterval(timer); streams.delete(end); res.end(); };
+    streams.add(end);
+    req.raw.on('close', end);
+    await tick();
+  });
+
   app.get('/api/v1/providers/status', async () => systemStatus(db, config, queues));
   app.patch('/api/v1/providers/:source', async req => {
     const { source } = C.SourceParams.parse(req.params), { enabled } = C.ProviderPatch.parse(req.body);

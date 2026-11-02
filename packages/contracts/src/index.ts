@@ -73,7 +73,13 @@ export const ScanAccepted = z.object({
   deduplicated: z.array(z.object({ platform: Source, label: z.string() })),
 });
 export const FacebookImport = z.object({ items: z.array(z.unknown()).max(100, 'Maximal 100 Einträge als items:[]') });
-export const ImportResult = z.object({ normalized: z.number().int(), fetched: z.number().int(), inserted: z.number().int(), matched: z.number().int(), priceChanges: z.number().int() });
+export const ImportResult = z.object({ normalized: z.number().int(), fetched: z.number().int(), inserted: z.number().int(), matched: z.number().int(), priceChanges: z.number().int(), alerts: z.number().int() });
+export const Alert = z.object({
+  id: z.number().int(), kind: z.enum(['SCHNAPPER', 'DEAL', 'REPAIR', 'PRICE_DROP']), priority: z.number().int(), reasons: z.array(z.string()), createdAt: isoTime,
+  listingId: z.number().int(), watchlistId: z.number().int().nullable(), watchlistName: z.string().nullable(), source: Source, title: z.string(), url: z.string(),
+  priceEur: z.number(), shippingEur: z.number().nullable(), publishedAt: isoTime.nullable(), firstSeenAt: isoTime, fetchedAt: isoTime,
+});
+export const AlertsQuery = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) });
 export const Login = z.object({ password: z.string().max(1024) });
 export const ProviderPatch = z.object({ enabled: z.boolean() });
 
@@ -94,7 +100,7 @@ export const SystemStatus = z.object({
   limits: z.object({ daily: count, monthly: count, perQueryDaily: count }),
 });
 export const DashboardState = z.object({
-  stats: z.object({ total: count, saved: count, repairCandidates: count }),
+  stats: z.object({ total: count, saved: count, repairCandidates: count, alertsToday: count }),
   models: z.array(z.string()),
   demoMode: z.boolean(),
 });
@@ -125,6 +131,8 @@ export const routes: RouteContract[] = [
   { method: 'GET', path: '/api/v1/listings', summary: 'Deal-Feed mit Filtern und Cursor', query: FeedQuery, responses: { 200: FeedResponse, 400: E } },
   { method: 'GET', path: '/api/v1/listings/:id', summary: 'Inserat mit Bewertung und Preisverlauf', params: IdParams, responses: { 200: z.object({ item: ListingDetail }), 404: E } },
   { method: 'PATCH', path: '/api/v1/listings/:id/user-state', summary: 'saved, dismissed, contacted, purchased', params: IdParams, body: UserStatePatch, responses: { 200: Ok, 400: E, 404: E } },
+  { method: 'GET', path: '/api/v1/alerts', summary: 'Ausgelöste Alerts, neueste zuerst', query: AlertsQuery, responses: { 200: z.object({ items: z.array(Alert) }), 400: E } },
+  { method: 'GET', path: '/api/v1/events', summary: 'Live-Alerts als Server-Sent Events (text/event-stream): event alert, id = Alert-ID, Last-Event-ID setzt fort', responses: { 200: null } },
   { method: 'GET', path: '/api/v1/providers/status', summary: 'Systemstatus: Quellen, Queues, Quoten, Worker', responses: { 200: SystemStatus } },
   { method: 'PATCH', path: '/api/v1/providers/:source', summary: 'Quelle zur Laufzeit ein-/ausschalten', params: SourceParams, body: ProviderPatch, responses: { 200: Ok, 400: E } },
   { method: 'POST', path: '/api/v1/admin/scans', summary: 'Manuellen Scan einplanen', body: ScanRequest, responses: { 202: ScanAccepted, 409: E, 429: E } },

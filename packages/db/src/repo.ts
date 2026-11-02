@@ -114,7 +114,7 @@ export async function ingestListings(db: Db, items: unknown[], { fetchedAt = new
   const valid = items.map(x => validListing(x as Row)).filter(x => x !== null)
     // Stable lock order across concurrent batches avoids deadlocks.
     .sort((a, b) => `${a.source}|${a.externalId}`.localeCompare(`${b.source}|${b.externalId}`));
-  let inserted = 0, matched = 0, priceChanges = 0;
+  let inserted = 0, matched = 0, priceChanges = 0, alerts = 0;
   await tx(db, async c => {
     for (const item of valid) {
       const up = await c.query(`WITH prior AS (SELECT price_eur FROM listings WHERE source = $1 AND external_id = $2)
@@ -150,11 +150,21 @@ export async function ingestListings(db: Db, items: unknown[], { fetchedAt = new
           ON CONFLICT (listing_id, watchlist_id) DO UPDATE SET assessment = EXCLUDED.assessment, evaluation_version = EXCLUDED.evaluation_version`,
         [row.id, w.id, EVALUATION_VERSION, assessment]);
         keep.push(w.id); matched++;
+        const events: [string, string, string[]][] = assessment.alerts.map(kind => [kind, `${row.id}:${w.id}:${kind}`, assessment.reasons]);
+        // A drop of at least 5 % that ends within the purchase limit; each new price level alerts once.
+        const prior = row.prior_price as number | null;
+        if (prior !== null && item.priceEur <= prior * 0.95 && (assessment.discountPct ?? -1) >= 0) {
+          events.push(['PRICE_DROP', `${row.id}:${w.id}:PRICE_DROP:${item.priceEur}`, [`−${cents(prior - item.priceEur)} € (von ${prior} € auf ${item.priceEur} €)`, ...assessment.reasons]]);
+        }
+        for (const [kind, key, reasons] of events) {
+          alerts += (await c.query(`INSERT INTO alerts (listing_id, watchlist_id, kind, dedupe_key, priority, reasons) VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (dedupe_key) DO NOTHING`, [row.id, w.id, kind, key, assessment.priority, JSON.stringify(reasons.slice(0, 3))])).rowCount ?? 0;
+        }
       }
       await c.query('DELETE FROM watchlist_matches WHERE listing_id = $1 AND watchlist_id = ANY($2::int[]) AND NOT (watchlist_id = ANY($3::int[]))', [row.id, activeIds, keep]);
     }
   });
-  return { fetched: items.length, inserted, matched, priceChanges };
+  return { fetched: items.length, inserted, matched, priceChanges, alerts };
 }
 
 const feedSql = `SELECT l.*, w.name AS watchlist_name, w.id AS watchlist_id, w.query, w.max_working, w.max_defect, w.expected_resale, w.repair_budget, w.allow_unknown_shipping
@@ -185,7 +195,26 @@ export async function setListingStatus(db: Queryable, id: number, status: unknow
 export async function listStats(db: Queryable) {
   const r = (await db.query("SELECT count(*) AS total, count(*) FILTER (WHERE status = 'saved') AS saved FROM listings")).rows[0];
   const repair = (await db.query("SELECT count(DISTINCT listing_id) AS n FROM watchlist_matches WHERE assessment->>'health' IN ('defect', 'unknown')")).rows[0];
-  return { total: r.total as number, saved: r.saved as number, repairCandidates: repair.n as number };
+  const alerts = (await db.query("SELECT count(*) AS n FROM alerts WHERE created_at >= date_trunc('day', now())")).rows[0];
+  return { total: r.total as number, saved: r.saved as number, repairCandidates: repair.n as number, alertsToday: alerts.n as number };
+}
+
+// createdAt minus publishedAt/firstSeenAt is the pipeline latency of an alert (DF-308).
+const alertSql = `SELECT a.*, w.name AS watchlist_name, l.source, l.title, l.url, l.price_eur, l.shipping_eur, l.published_at, l.first_seen_at, l.fetched_at
+  FROM alerts a JOIN listings l ON l.id = a.listing_id LEFT JOIN watchlists w ON w.id = a.watchlist_id`;
+const alertFromRow = (r: Row) => ({ id: r.id as number, kind: r.kind as string, priority: r.priority as number, reasons: r.reasons as string[],
+  createdAt: r.created_at as string, listingId: r.listing_id as number, watchlistId: r.watchlist_id as number | null, watchlistName: r.watchlist_name as string | null,
+  source: r.source as Source, title: r.title as string, url: r.url as string, priceEur: r.price_eur as number, shippingEur: r.shipping_eur as number | null,
+  publishedAt: r.published_at as string | null, firstSeenAt: r.first_seen_at as string, fetchedAt: r.fetched_at as string });
+export async function recentAlerts(db: Queryable, limit = 50) {
+  return (await db.query(`${alertSql} ORDER BY a.id DESC LIMIT $1`, [limit])).rows.map(alertFromRow);
+}
+/** Oldest first: what a live client has not seen yet. */
+export async function alertsAfter(db: Queryable, afterId: number, limit = 50) {
+  return (await db.query(`${alertSql} WHERE a.id > $1 ORDER BY a.id LIMIT $2`, [afterId, limit])).rows.map(alertFromRow);
+}
+export async function latestAlertId(db: Queryable) {
+  return (await db.query('SELECT coalesce(max(id), 0) AS id FROM alerts')).rows[0].id as number;
 }
 
 export interface SourceRun { source: string; queryKey: string | null; startedAt: string; status: 'ok' | 'error' | 'skipped';

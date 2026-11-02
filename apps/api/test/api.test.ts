@@ -1,9 +1,10 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import type { AddressInfo } from 'node:net';
 import { loadConfig } from '@dealforge/config';
 import { routes, ErrorBody } from '@dealforge/contracts';
-import { createTestDb, seed, reserveProviderCall, type Db } from '@dealforge/db';
+import { createTestDb, seed, reserveProviderCall, ingestListings, type Db } from '@dealforge/db';
 import { createQueues, redisConnection, type Queues } from '@dealforge/jobs';
 import { buildApp } from '../src/app.ts';
 
@@ -120,4 +121,27 @@ test('System status, provider switch and manual scans (202, 409, 429)', async ()
   const blocked = await call('POST', '/api/v1/admin/scans', {});
   assert.equal(blocked.status, 429); assert.equal(blocked.body.code, 'BUDGET_EXHAUSTED');
   assert.equal((await call('GET', '/api/v1/providers/status')).body.providers[0].budgetExhausted, 'Tagesbudget erreicht');
+});
+
+test('DF-306: alert list and live SSE stream with Last-Event-ID resume', async () => {
+  const gpu = (id: string) => ({ source: 'ebay', externalId: id, title: 'MSI RTX 4070 Super Ventus 12GB', priceEur: 300, shippingEur: 5,
+    url: `https://www.ebay.de/itm/${id}`, publishedAt: new Date().toISOString() });
+  assert.equal((await call('GET', '/api/v1/events', undefined, { auth: false })).status, 401);
+  await ingestListings(db, [gpu('sse-1')]);
+  const [first] = (await call('GET', '/api/v1/alerts?limit=5')).body.items;
+  assert.equal(first.url, 'https://www.ebay.de/itm/sse-1');
+  assert.equal((await call('GET', '/api/v1/alerts?limit=0')).status, 400);
+  assert.ok((await call('GET', '/api/v1/state')).body.stats.alertsToday >= 1);
+
+  await built.app.listen({ host: '127.0.0.1', port: 0 });
+  const { port } = built.app.server.address() as AddressInfo;
+  const res = await fetch(`http://127.0.0.1:${port}/api/v1/events`, { headers: { cookie, 'last-event-id': String(first.id - 1) } });
+  assert.equal(res.headers.get('content-type'), 'text/event-stream; charset=utf-8');
+  const reader = res.body!.getReader(), decoder = new TextDecoder();
+  let text = '';
+  const until = async (pattern: RegExp) => { while (!pattern.test(text)) text += decoder.decode((await reader.read()).value, { stream: true }); };
+  await until(new RegExp(`id: ${first.id}\nevent: alert\n`));
+  await ingestListings(db, [gpu('sse-2')]);
+  await until(/event: alert\ndata: .*itm\/sse-2/);
+  await reader.cancel();
 });

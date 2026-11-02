@@ -61,7 +61,8 @@ Der Import übernimmt Suchprofile, Inserate, Treffer, Preisverlauf und Läufe mi
 - eBay Browse OAuth-Adapter (API-Schlüssel erforderlich) und Kleinanzeigen Agent REST-Adapter (explizit risikobehaftete Drittanbieter-Quelle; Schlüssel und Freigabe erforderlich)
 - Facebook Marketplace ausschließlich über manuellen JSON-Testdatenimport. Keine ungeprüfte automatische Datenbeschaffung
 - Worker mit Poll-Scheduler, manuellem Scan, Budget-Gate, Laufzeitschalter je Quelle und Systemstatus
-- Browser-Notifications für neue Alerts bei **geöffneter Seite** und erteilter Berechtigung; noch kein echtes serverseitiges Web Push
+- Alert-Engine: `SCHNAPPER`, `DEAL`, `REPAIR` höchstens einmal je Inserat und Suchprofil, `PRICE_DROP` (≥5 % gesunken, innerhalb der Kaufgrenze) einmal je neuem Preis – wiederholte Jobs und Replays erzeugen keine Dubletten
+- Live-Alerts per Server-Sent Events (`/api/v1/events`, Fortsetzung über `Last-Event-ID`) und Browser-Notifications bei **geöffneter Seite**; noch kein serverseitiges Web Push
 - `node:test`-Tests (Domain, Provider, Datenbank, Worker, API-Contract) und explizite, optionale Live-Provider-Probes
 
 ## Datenquellen
@@ -127,7 +128,7 @@ Nur `https://facebook.com` und die gebräuchlichen Subdomains werden angenommen.
 
 ## Was fehlt noch?
 
-Server-Betrieb (24/7, HTTPS, Backups – siehe Randbedingung im Umsetzungsplan), eingehende Provider-Webhooks und serverseitiges Web Push (P3), echte marktplatzübergreifende Angebots-Dubletten, Marktpreise und Preistrends, Auth per OIDC/Passkey, React/Vite-Oberfläche (die bestehende UI wurde nur auf `/api/v1` umgehängt), API-Anbieter-Abnahme. Für den Beta-Betrieb ist außerdem ein Security Review notwendig.
+Server-Betrieb (24/7, HTTPS, Backups – siehe Randbedingung im Umsetzungsplan), serverseitiges Web Push (P3), eingehende Provider-Webhooks (erst mit Server, P7), echte marktplatzübergreifende Angebots-Dubletten, Marktpreise und Preistrends, Auth per OIDC/Passkey, React/Vite-Oberfläche (die bestehende UI wurde nur auf `/api/v1` umgehängt), API-Anbieter-Abnahme. Für den Beta-Betrieb ist außerdem ein Security Review notwendig.
 
 Die Roadmap und Abnahmekriterien stehen in [`DealForge_Umsetzungsplan_Detailliert.md`](DealForge_Umsetzungsplan_Detailliert.md).
 
@@ -154,6 +155,7 @@ Vollständig als OpenAPI 3.1 unter `GET /api/v1/openapi.json` (aus den Zod-Contr
 - `GET|POST /api/v1/watchlists`, `PATCH|DELETE /api/v1/watchlists/:id`
 - `GET /api/v1/listings?mode=all|schnapper|deal|repair&source=…&watchlistId=…&limit=…&cursor=…`, `GET /api/v1/listings/:id`
 - `PATCH /api/v1/listings/:id/user-state` mit `new`, `saved`, `dismissed`, `contacted`, `purchased`
+- `GET /api/v1/alerts?limit=…` (neueste zuerst), `GET /api/v1/events` (SSE, `event: alert`)
 - `POST /api/v1/admin/scans` (`{"source":"all"}`) → `202`, `409` bei laufendem Scan, `429` bei erschöpftem Budget
 - `POST /api/v1/import/facebook` (`{"items":[...]}`)
 

@@ -211,7 +211,7 @@ close:`
 ................`};
 const icon=n=>{const d={'#':'','+':''};ICONS[n].trim().split('\n').forEach((row,y)=>[...row].forEach((c,x)=>{if(c in d)d[c]+=`M${x} ${y}h1v1h-1z`;}));return `<svg class="px" viewBox="0 0 16 16" aria-hidden="true"><path d="${d['#']}"/><path d="${d['+']}" opacity=".35"/></svg>`;};
 document.querySelectorAll('[data-icon]').forEach(el=>el.insertAdjacentHTML('afterbegin',icon(el.dataset.icon)));
-let mode='all',lastIds=null,state={},busy=false;
+let mode='all',state={},busy=false;
 const toast=(m)=>{const el=$('#toast');el.textContent=m;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),3300);};
 async function api(path,{method='GET',data}={}){
   const headers={'Accept':'application/json','X-Dealforge-Action':'1',...(data===undefined?{}:{'Content-Type':'application/json'})};
@@ -238,17 +238,11 @@ function syncFilterLabels(){
     d.querySelector('summary').textContent=d.dataset.label?`${d.dataset.label}: ${!on.length||on.length===inputs.length?'Alle':on.join(', ')}`:on[0]??'';
   }
 }
-async function loadFeed({notify=false}={}){
+async function loadFeed(){
   const f=new FormData($('#feed-filters')),source=f.get('source'),watch=f.get('watch'),offer=f.getAll('offer'),cond=f.getAll('cond');
   const p=new URLSearchParams({mode,source});if(watch)p.set('watchlistId',watch);
   const {items}=await api(`/listings?${p}`);
   const visible=items.filter(x=>x.status!=='dismissed');
-  const newIds=new Set(items.map(x=>`${x.source}:${x.externalId}`));
-  if(notify && lastIds!==null && 'Notification' in window && Notification.permission==='granted'){
-    const fresh=visible.filter(x=>!lastIds.has(`${x.source}:${x.externalId}`) && x.assessment.alerts.length);
-    for(const x of fresh.slice(0,3)){new Notification(`DealForge: ${x.assessment.alerts[0]}`,{body:`${x.title} · ${eur(x.assessment.allIn)}`,tag:`dealforge-${x.source}-${x.externalId}`});}
-  }
-  lastIds=newIds;
   const shown=visible.filter(x=>(!offer.length||offer.includes(x.assessment.offerType==='AUCTION'?'auction':'fixed'))&&(!cond.length||cond.includes(condition(x)))).sort(sorters[f.get('sort')]);
   $('#feed').innerHTML=shown.length?shown.map(dealCard).join(''):'<div class="empty">Keine passenden Anzeigen. Ändere den Filter oder starte einen Scan.</div>';
   $('#last-update').textContent=`Aktualisiert ${new Date().toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})}`;
@@ -284,7 +278,27 @@ async function loadState(){
   const worker=status.worker.online?'':`<div class="provider"><div><strong>Worker</strong><small>Kein Heartbeat${status.worker.lastHeartbeatAt?` seit ${esc(timeAgo(status.worker.lastHeartbeatAt))}`:''} – keine Abfragen möglich</small></div><span class="status">AUSFALL</span></div>`;
   $('#provider-list').innerHTML=worker+status.providers.map(p=>providerRow(p,status)).join('');
 }
-async function refresh(notify=false){if(busy)return;busy=true;try{await loadState();await loadFeed({notify});}catch(e){if(e.message!=='Bitte anmelden')toast(e.message);}finally{busy=false;}}
+const alertLabel={SCHNAPPER:'SCHNAPPER',DEAL:'PREISALARM',REPAIR:'REPAIR',PRICE_DROP:'PREISSTURZ'};
+// Pipeline latency: alert time minus listing time (published, else first seen).
+const latency=a=>{const s=Math.round((Date.parse(a.createdAt)-Date.parse(a.publishedAt||a.firstSeenAt))/1000);return Number.isFinite(s)&&s>=0?` · ${s<120?s+' s':Math.round(s/60)+' Min.'} nach ${a.publishedAt?'Inserat':'Fund'}`:'';};
+async function loadAlerts(){
+  const {items}=await api('/alerts?limit=8');
+  $('#alert-list').innerHTML=items.length?items.map(a=>`<div class="provider"><div><strong><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a></strong><small>${eur(a.priceEur)} · ${esc(names[a.source])}${a.watchlistName?` · ${esc(a.watchlistName)}`:''} · ${esc(timeAgo(a.createdAt))}${latency(a)}</small><small>${a.reasons.slice(0,2).map(esc).join(' · ')}</small></div><span class="status">${alertLabel[a.kind]}</span></div>`).join(''):'<div class="helper">Noch keine Alerts.</div>';
+}
+// Live alerts via SSE; EventSource reconnects on its own and resumes with Last-Event-ID.
+let feedTimer=null;
+function connectEvents(){
+  const es=new EventSource('/api/v1/events');
+  es.addEventListener('alert',e=>{
+    const a=JSON.parse(e.data);
+    if('Notification' in window&&Notification.permission==='granted')new Notification(`DealForge: ${alertLabel[a.kind]}`,{body:`${a.title} · ${eur(a.priceEur)}`,tag:`dealforge-alert-${a.id}`});
+    toast(`${alertLabel[a.kind]}: ${a.title}`);
+    clearTimeout(feedTimer);feedTimer=setTimeout(()=>refresh(),500);
+  });
+  // A 401 (not logged in yet) closes the stream for good: try again later.
+  es.onerror=()=>{if(es.readyState===EventSource.CLOSED)setTimeout(connectEvents,10000);};
+}
+async function refresh(){if(busy)return;busy=true;try{await loadState();await Promise.all([loadFeed(),loadAlerts()]);}catch(e){if(e.message!=='Bitte anmelden')toast(e.message);}finally{busy=false;}}
 $('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/auth/login',{method:'POST',data:{password:$('#password').value}});$('#login').hidden=true;$('#password').value='';await refresh();}catch(ex){$('#login-error').textContent=ex.message;}});
 $('#scan').addEventListener('click',async()=>{if(busy)return;$('#scan').disabled=true;$('#scan span').textContent='Wird geprüft …';try{const r=await api('/admin/scans',{method:'POST',data:{source:'all'}});toast(`${r.queued.length} Abfragen eingeplant${r.deduplicated.length?`, ${r.deduplicated.length} laufen bereits`:''}`);await refresh();}catch(e){toast(e.message);}finally{$('#scan').disabled=false;$('#scan span').textContent='Jetzt prüfen';}});
 $('#notify').addEventListener('click',async()=>{if(!('Notification'in window)){toast('Benachrichtigungen werden hier nicht unterstützt');return;}try{const result=await Notification.requestPermission();toast(result==='granted'?'Browser-Alerts aktiv solange die WebApp geöffnet ist':'Benachrichtigungen nicht erlaubt');}catch(e){toast(e.message);}});
@@ -297,4 +311,4 @@ $('#watchlist').addEventListener('click',async e=>{const btn=e.target.closest('[
 $('#feed').addEventListener('click',async e=>{const btn=e.target.closest('[data-action]');if(!btn)return;try{await api(`/listings/${Number(btn.dataset.id)}/user-state`,{method:'PATCH',data:{status:btn.dataset.action}});await refresh();}catch(e){toast(e.message);}});
 $('#import').addEventListener('click',async()=>{try{const json=JSON.parse($('#import-json').value);const rows=Array.isArray(json)?json:(Array.isArray(json.items)?json.items:null);if(!rows)throw Error('JSON-Array erwartet');const r=await api('/import/facebook',{method:'POST',data:{items:rows}});$('#import-message').textContent=`${r.normalized} Datensätze validiert, ${r.inserted} neue Inserate gespeichert`;await refresh();}catch(e){toast(e.message);}});
 $('#provider-list').addEventListener('click',async e=>{const btn=e.target.closest('[data-provider]');if(!btn)return;try{await api(`/providers/${btn.dataset.provider}`,{method:'PATCH',data:{enabled:btn.dataset.enabled!=='true'}});await refresh();}catch(e){toast(e.message);}});
-syncFilterLabels();refresh();setInterval(()=>refresh(true),15000);
+syncFilterLabels();refresh().then(connectEvents);setInterval(refresh,15000);
