@@ -2,7 +2,7 @@
 
 Eigenständige, responsive WebApp als Nachfolger des Discord-Bots [`illuuuuusion/gpu-search`](https://github.com/illuuuuusion/gpu-search). TypeScript-Monorepo mit Fastify-API, BullMQ-Worker, PostgreSQL und Redis; alles läuft lokal per `docker compose` (Node.js 22.18+ und pnpm über Corepack für die Entwicklung).
 
-> **Noch kein Server:** DealForge läuft vorerst nur lokal. Der Scheduler pollt nur, solange der Rechner und der Stack laufen; Messwerte aus diesem Betrieb gelten als „lokal, nicht durchgehend“.
+> **Server erst am Ende:** DealForge wird bis zur letzten Plan-Phase (P7) nur lokal entwickelt und getestet. Der Scheduler pollt nur, solange der Rechner und der Stack laufen; Messwerte aus diesem Betrieb gelten als „lokal, nicht durchgehend“.
 
 ## Starten (Docker Compose)
 

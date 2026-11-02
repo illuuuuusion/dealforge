@@ -40,7 +40,7 @@ DealForge bezieht Inserate von eBay, Kleinanzeigen und Facebook Marketplace. Tec
 - **Datenschutz:** nur Inseratsdaten speichern, keine Verkäuferdaten außer dem Nötigsten.
 - **Limit:** Tageskontingent der Anwendung laut Developer-Portal (Analytics/Rate Limits) prüfen. App-seitig gilt zusätzlich `PROVIDER_DAILY_CALL_LIMIT`.
 - **DF-002 erledigt (31.10.2026):** 12/12 Calls erfolgreich, 100 % valide, Sofortkauf- und Auktionstreffer, Links korrekt.
-- **Offen bis `GO`:** Freshness-Benchmark über 24–72 h und Bestätigung der API License Agreement.
+- **Offen bis `GO`:** Freshness-Benchmark über 24–72 h (erst auf dem Server, Plan-Phase P7 / DF-704) und Bestätigung der API License Agreement.
 - **Alternativen:** keine nötig. eBay ist der bevorzugte erste Live-Provider.
 
 ### Kleinanzeigen (über Kleinanzeigen Agent) – Status: `NO GO` (bis Freigabe)

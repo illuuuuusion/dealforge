@@ -5,6 +5,19 @@
 > Vorgeschlagenes neues Repository: `illuuuuusion/dealforge`  
 > Ziel: Persönliche, gehostete WebApp zum Entdecken von günstigen, sehr frischen und reparaturwürdigen Hardware-Angeboten aus eBay, Kleinanzeigen und – nur bei zulässigem Datenzugang – Facebook Marketplace. **Kein Discord-Bot.**
 
+## Stand und Grundregel (03.11.2026)
+
+**Server erst am Ende.** Alles wird lokal entwickelt und getestet (`docker compose`, `pnpm test`, CI). Jeder Schritt, der einen dauerhaft laufenden Server oder eine öffentliche HTTPS-Adresse braucht, ist in der Schlussphase **P7 – Server-Inbetriebnahme und Live-Abnahme** gebündelt: 24/7-Dauerläufe, 24–72h-Frische-Benchmarks, eingehende Webhooks, Push bei geschlossenem Browser/auf Mobilgeräten, TLS, Backups/Restore auf dem Host, Latenz-SLOs und die mobile Beta. Vorher wird lokal nur so weit gemessen, wie es ohne Server aussagekräftig ist; solche Werte gelten als „lokal, nicht durchgehend“.
+
+| Phase | Status |
+|---|---|
+| P0 Provider/Freigabe | eBay `GO LIMITED` (DF-001/002/005/006 erledigt); Kleinanzeigen `NO GO`, Facebook nur Import – Freigabe offen (DF-003/004) |
+| P1 Korrektheit/Domain | erledigt (Versand, Stale Matches, 49 Profile, Buckets, Auktionen, Zubehörfilter, 69 Fixtures, CI) |
+| P2 Backend/Pipeline | erledigt bis auf den Dauerlauf (→ P7) |
+| P3 Schnapper-Engine | **in Arbeit**: Alert-Engine mit Dedupe, Alert-Liste und SSE-Live-Feed lokal; Web Push als Nächstes |
+| P4–P6 | offen, lokal |
+| P7 Server | offen, ganz am Ende |
+
 ## 0. Verbindliche Leitentscheidungen
 
 ### Produktziel
@@ -134,7 +147,7 @@ Diese Punkte erhalten höchste Priorität:
 | `/market` Preisanalysen | Verteilung/Quantile je Modell, Zustand und Quelle; Datenmenge sichtbar | P5 |
 | `/settings/providers` Provider | Freigabe, Status, letzte Abfragen, Kosten, Budget, Token-Status (ohne Token im Browser) | P0/P2 |
 | `/settings/notifications` Alerts | Web-Push-Abo, Lautstärke, wichtige Suchprofile, Quiet Hours, Test-Alert | P3 |
-| `/settings/system` Betrieb | Fehler, Queue-Rückstand, Health, Export/Backups | P6 |
+| `/settings/system` Betrieb | Fehler, Queue-Rückstand, Health, Export/Backups | P6/P7 |
 
 ### 3.2 Inseratskarte – Pflichtfelder
 
@@ -254,7 +267,7 @@ Eine Erfolgswahrscheinlichkeit ist **nur** zu verwenden, wenn Nutzer oder belast
 | Kleinanzeigen | Kleinanzeigen Agent; weitere Anbieter nur bei plausibler Dokumentation und Nutzungsrechten | Suche `q`, 100 Ergebnisse, Region, IDs, Frische, Kosten; optional **signierter** Webhook für Schnapper | GO nur bei **technischem Test + rechtlicher/vertraglicher Freigabe** |
 | Facebook | Dokumentierte Drittanbieter-API oder Apify-Actor nur nach ausdrücklicher Freigabe; manueller Import als Fallback | DE-Suchtreffer, Item-IDs, Zugänglichkeit, Veröffentlichungszeit, Preis, 72h-Ausfälle, Kosten | Ohne belastbaren Zugang dauerhaft **NO GO für automatische Live-Suche** |
 
-**Aktueller Status (31.10.2026):** Nur Dokumentation und Quellcode geprüft. **Keine** kostenpflichtigen Provider-Probes, keine 72h-Messung und keine Nutzungsrechte-Freigabe erfolgt. Keine Auskunft über tatsächlich garantierte Aktualität.
+**Aktueller Status (03.11.2026):** eBay live geprobt (12/12 Calls, `GO LIMITED`, siehe ADR 001). Kleinanzeigen und Facebook ohne Nutzungsrechte-Freigabe, keine kostenpflichtigen Probes. Die 72h-Messung läuft erst auf dem Server (P7, `DF-704`). Keine Auskunft über tatsächlich garantierte Aktualität.
 
 ### 5.2 Aufruf-Verträge und besondere technische Grenzen
 
@@ -281,7 +294,7 @@ Eine Erfolgswahrscheinlichkeit ist **nur** zu verwenden, wenn Nutzer oder belast
 - Je Query mindestens zwei Wiederholungen; Duplikate und stabile IDs vergleichen.
 - Fehlerpfade absichtlich simulieren: fehlender Token, `401/403`, leeres Ergebnis, `429`, Timeout, unvollständiges JSON, falsch gemappter Zustand.
 
-**P0.3 – 24–72 Stunden Frische und Betrieb**
+**P0.3 – 24–72 Stunden Frische und Betrieb** (auf dem Server in P7, `DF-704`)
 
 - Zulässige Query-Frequenz wählen und absolutem Tages-/Monatsbudget unterwerfen.
 - `request_started_at`, `response_received_at`, `provider_published_at`, `dealforge_first_seen_at`, `alert_queued_at` und `alert_delivered_at` speichern.
@@ -482,12 +495,12 @@ Der Server weist eine explizit nicht freigegebene Quelle mit einem verständlich
 
 **Definition of Done P1:** 40 oder mehr konkrete Titel-/Defekt-Fixtures; keine bekannten Modellvarianten-Fehltreffer in der Testliste. Bei aktualisierten Inseraten entstehen keine veralteten Matches. Bestehende 14 Tests bleiben grün.
 
-> **Randbedingung (Stand 31.10.2026): Es steht noch kein Server bereit.** DealForge läuft vorerst nur lokal auf dem Entwicklungsrechner, nicht 24/7 und ohne öffentliche HTTPS-URL. Alle folgenden Phasen müssen das berücksichtigen:
-> - Alles muss lokal per `docker compose up` (App, Worker, PostgreSQL, Redis) startbar und testbar sein; kein Schritt darf einen gehosteten Dienst voraussetzen.
-> - Dauerläufe (24h-Staging in P2, 24–72h-Frische-Benchmark für eBay) laufen lokal und lückenhaft. Ergebnisse als „lokal, nicht durchgehend“ kennzeichnen; das volle eBay-`GO` und Latenz-SLOs erst nach Server-Betrieb.
-> - Eingehende Provider-Webhooks (P3) brauchen eine öffentliche HTTPS-Adresse und sind bis dahin nicht testbar → nur Polling.
-> - Web Push (P3) lokal nur über `localhost` testen; Zustellung bei geschlossenem Browser erst mit Server.
-> - Deployment-Artefakte (Compose, Reverse Proxy, Backups) so vorbereiten, dass ein späterer Umzug auf einen VPS ohne Umbau möglich ist; P6 beginnt mit der Server-Bereitstellung.
+> **Randbedingung: Server erst am Ende (P7).** P2–P6 laufen vollständig lokal auf dem Entwicklungsrechner, nicht 24/7 und ohne öffentliche HTTPS-URL:
+> - Alles muss lokal per `docker compose up` (App, Worker, PostgreSQL, Redis) startbar und per `pnpm test`/CI prüfbar sein; kein Schritt darf einen gehosteten Dienst voraussetzen.
+> - Lokale Messungen sind erlaubt, aber als „lokal, nicht durchgehend“ zu kennzeichnen. Dauerläufe, das volle eBay-`GO` und Latenz-SLOs gehören zu P7.
+> - Eingehende Provider-Webhooks brauchen eine öffentliche HTTPS-Adresse → bis P7 nur Polling; Webhook-Empfang wird erst gebaut, wenn ein Provider mit Webhooks ein `GO` hat.
+> - Web Push wird lokal über `localhost` bei geöffnetem Browser getestet; Zustellung bei geschlossenem Browser und auf Mobilgeräten erst in P7.
+> - Deployment-Artefakte (Compose, Reverse Proxy, Backup-Skripte) werden lokal vorbereitet und getestet, sodass P7 nur noch Bereitstellung und Abnahme ist.
 
 ### Phase P2 – Plattform-Backend, Datenpipeline und Dauerbetrieb (6–10 Arbeitstage)
 
@@ -505,7 +518,7 @@ Der Server weist eine explizit nicht freigegebene Quelle mit einem verständlich
 | `DF-208` | Beobachtungs- und Preis-Historie, `first_seen`/`published`/`fetched` festlegen | Replays erzeugen keine Doppel-Preissnapshots |
 | `DF-209` | Monitoring: Queuelänge, letzter erfolgreicher Poll, Fehlerrate, Quota/Tag | Betreiber sieht Ausfall im Systemstatus |
 
-**Definition of Done P2:** Worker-Reboot/Netzwerkfehler getestet; mindestens 24h lokaler Staging-Dauerlauf mit Fixture-/freigegebenen echten Quellen; keine doppelten Alerts oder Datenbankfehler. Simulierte Quota-Überschreitung stoppt externe Calls zuverlässig.
+**Definition of Done P2:** Worker-Reboot/Netzwerkfehler getestet; keine doppelten Alerts oder Datenbankfehler in den Integrationstests. Simulierte Quota-Überschreitung stoppt externe Calls zuverlässig. Der 24h-Staging-Dauerlauf mit echten Quellen ist nach P7 verschoben.
 
 ### Phase P3 – Schnapper-Engine und mobile Benachrichtigungen (5–7 Arbeitstage)
 
@@ -514,15 +527,15 @@ Der Server weist eine explizit nicht freigegebene Quelle mit einem verständlich
 | Ticket | Konkrete Aufgabe | Ergebnis/Abnahme |
 |---|---|---|
 | `DF-301` | Fast- und Standard-Watchlists definieren, Quellenfähigkeit berücksichtigen | Schnelle Quellen werden priorisiert; API-Limits bleiben bindend |
-| `DF-302` | Eingehende Webhooks mit HMAC, Timestamp-Toleranz und Replay-Schutz | Ungültige Signatur -> `401`, doppelte Delivery -> kein neuer Treffer |
+| `DF-302` | Eingehende Webhooks mit HMAC, Timestamp-Toleranz und Replay-Schutz – **erst wenn ein Provider mit Webhooks `GO` hat**, Live-Test in P7 | Ungültige Signatur -> `401`, doppelte Delivery -> kein neuer Treffer |
 | `DF-303` | Ereignis `listing.detected` / `listing.changed` intern publizieren | Reproduzierbarer Event-Flow vom Adapter zum Alert |
 | `DF-304` | Alert-Engine mit `dedupe_key`, Cooldown, Priorität | Wiederholte Jobs produzieren höchstens einen Erstalert |
-| `DF-305` | VAPID/Service Worker + Push-Abo-Verwaltung, Opt-in im Browser | Test-Alert funktioniert auf tatsächlich unterstützten Geräten |
+| `DF-305` | VAPID/Service Worker + Push-Abo-Verwaltung, Opt-in im Browser | Test-Alert kommt lokal auf `localhost` an; Geräte-Tests in P7 |
 | `DF-306` | SSE für Live-Feed, Reconnect, Cursor/Last-Event-ID | Neue Treffer erscheinen ohne manuelles Reload |
 | `DF-307` | Zustellungslog: erstellt, versandt, zugestellt sofern belegbar, fehlgeschlagen | Keine falsche „zugestellt“-Anzeige ohne Bestätigung |
-| `DF-308` | End-to-End-Latenz messen: Anbieter -> Worker -> Push | p50/p95 getrennt nach Quelle und Pipeline messbar |
+| `DF-308` | End-to-End-Latenz erfassen: Anbieter -> Worker -> Alert -> Push | Messpunkte gespeichert, p50/p95 abfragbar; aussagekräftige Werte erst in P7 |
 
-**Definition of Done P3:** In unterstützten Browsern kommt ein Test-Push bei nicht aktivem Tab an. Ein wiederholter Webhook führt weder zu doppeltem Inserat noch zu doppeltem Erstalert. Gemessene Frische ist sichtbar; es wird **kein** 10-Sekunden-Versprechen ohne Provider-Nachweis gemacht. iOS-/PWA-/Benachrichtigungsfreigabe gesondert testen.
+**Definition of Done P3 (lokal):** Ein Test-Push kommt im lokalen Browser bei nicht aktivem Tab an. Wiederholte Jobs/Replays führen weder zu doppeltem Inserat noch zu doppeltem Erstalert. Gemessene Frische ist sichtbar; es wird **kein** 10-Sekunden-Versprechen ohne Provider-Nachweis gemacht. Webhooks, iOS-/PWA- und Geräte-Push werden in P7 abgenommen.
 
 ### Phase P4 – Repair Lab mit wirtschaftlicher Bewertung (5–8 Arbeitstage)
 
@@ -555,22 +568,38 @@ Der Server weist eine explizit nicht freigegebene Quelle mit einem verständlich
 
 **Definition of Done P5:** Jeder angezeigte Marktwert benennt Datenfenster, Samplegröße und Berechnung. Angebotspreise werden nicht als tatsächlich erzielte Verkaufspreise ausgegeben.
 
-### Phase P6 – Private Beta, Betrieb und Sicherheit (5–8 Arbeitstage)
+### Phase P6 – Härtung und Betriebsvorbereitung, lokal (4–6 Arbeitstage)
 
-**Ziel:** Stabiler, sicherer persönlicher Dauerbetrieb ohne Discord.
+**Ziel:** Alles, was der spätere Dauerbetrieb braucht, lokal fertig und getestet – ohne Server.
 
 | Ticket | Konkrete Aufgabe | Ergebnis/Abnahme |
 |---|---|---|
 | `DF-601` | Login/Session gehärtet; optional OIDC/Passkey statt eigener Passwort-Logik | Keine offene API; Session-/CSRF-/Origin-Tests bestanden |
-| `DF-602` | HTTPS-Reverse-Proxy, Security Headers, sichere Cookies, CORS | TLS aktiv; Browser-Konsole ohne Mixed Content |
+| `DF-602` | Reverse-Proxy-Konfiguration (z. B. Caddy) im Compose-Profil, Security Headers, sichere Cookies, CORS | Lokal mit selbstsigniertem/internem Zertifikat geprüft; Browser-Konsole ohne Mixed Content |
 | `DF-603` | Verschlüsselte Secrets/Provider-Keys, Rotation, Redaction, Audit-Logs | Kein Key in Frontend/Logs/Git |
-| `DF-604` | DB-Backups täglich, 7/30 Tage Retention je nach Bedarf; Restore-Test | Erfolgreiche Wiederherstellung in Staging dokumentiert |
-| `DF-605` | CI/CD: Tests, Build, Migration Dry Run, Smoke nach Deploy | Fehlgeschlagener Build stoppt Release |
-| `DF-606` | Alert-SLA/Monitoring, Provider-Störung sichtbar; Alarm bei Ausfällen | Quelle mit 24h Fehlerstatus fällt in Dashboard auf |
-| `DF-607` | DSGVO-/AGB-/Retention-Review, Impressum/Datenschutz je Betriebsform | Öffentliche Bereitstellung erst nach Prüfentscheidung |
-| `DF-608` | Mobile Beta mit echter Benutzung, mindestens 20 qualitative Fund-Feedbacks | dokumentierte Fehltreffer und Korrekturen |
+| `DF-604` | Backup-/Restore-Skripte (täglich, 7/30 Tage Retention) | Restore in leeres lokales Compose-Projekt erfolgreich, dokumentiert |
+| `DF-605` | CI/CD: Tests, Build, Migration Dry Run, Image-Build; Deploy-Job vorbereitet, noch inaktiv | Fehlgeschlagener Build stoppt Release |
+| `DF-606` | Alert-SLA/Monitoring, Provider-Störung sichtbar; Alarm bei Ausfällen | Quelle mit 24h Fehlerstatus fällt in Dashboard auf (per Test mit simulierten Läufen) |
+| `DF-607` | DSGVO-/AGB-/Retention-Review, Impressum/Datenschutz je Betriebsform | Prüfentscheidung liegt vor P7 vor |
 
-**Definition of Done P6:** Live-Installation mit HTTPS, funktionierenden Backups/Restore, Alerts und transparentem Providerstatus. Für nicht freigegebene Quellen bleibt die Live-Abfrage deaktiviert.
+**Definition of Done P6:** `docker compose` mit Proxy-Profil startet lokal eine vollständige Installation; Backup und Restore sind lokal erprobt; die Release-Checkliste ist bis auf die Server-Punkte abgehakt.
+
+### Phase P7 – Server-Inbetriebnahme und Live-Abnahme (3–5 Arbeitstage + 72h Messung)
+
+**Ziel:** Erst jetzt wird auf einem Server ausgeführt und getestet. Voraussetzung: P6 abgeschlossen, Server/VPS verfügbar.
+
+| Ticket | Konkrete Aufgabe | Ergebnis/Abnahme |
+|---|---|---|
+| `DF-701` | VPS bereitstellen, Domain, Compose-Stack mit Proxy deployen, TLS aktiv | `GET /api/v1/health/ready` über HTTPS grün |
+| `DF-702` | Backups auf dem Host aktivieren, Restore-Test auf leerem Staging | Wiederherstellung dokumentiert, RPO/RTO festgelegt |
+| `DF-703` | 24h+ Dauerlauf mit eBay (ehemals P2-DoD) | Keine doppelten Alerts/DB-Fehler, Budget hält |
+| `DF-704` | eBay-Frische-Benchmark 24–72h mit manueller Referenzstichprobe | Bericht `docs/provider-evaluation/ebay-<datum>.md`; Entscheidung `GO` oder bleibt `GO LIMITED` |
+| `DF-705` | Web Push auf echten Geräten (Android, Desktop, iOS-PWA) bei geschlossenem Browser | Test-Push kommt an; Abmelden stoppt weitere Pushs |
+| `DF-706` | Webhook-Empfang live testen – nur falls ein Provider mit Webhooks `GO` hat | HMAC/Replay-Tests gegen echte Deliveries bestanden |
+| `DF-707` | End-to-End-Latenz und SLOs aus Abschnitt 11.2 messen | p50/p95 je Quelle dokumentiert |
+| `DF-708` | Mobile Beta mit echter Benutzung, mindestens 20 qualitative Fund-Feedbacks | Dokumentierte Fehltreffer und Korrekturen |
+
+**Definition of Done P7:** Live-Installation mit HTTPS, funktionierenden Backups/Restore, Alerts, Push und transparentem Providerstatus. Für nicht freigegebene Quellen bleibt die Live-Abfrage deaktiviert.
 
 ## 9. Umsetzungstaktik – konkrete Reihenfolge und Abhängigkeiten
 
@@ -591,10 +620,13 @@ DF-201/202 API/TS ─> DF-203 DB-Migration ─> DF-204 Worker
                              DF-303 Events ─> DF-304 Alerts ─> DF-305 Web Push
                                                 │
                                                 ▼
-                                            Private Beta
+                                   P4 / P5 / P6 (alles lokal)
+                                                │
+                                                ▼
+                          P7 Server: Deploy ─> Dauerlauf/Benchmark ─> Private Beta
 
 P4 Repair Lab und P5 Marktwert dürfen parallel nach P2 beginnen,
-sollten aber die Schnapper-Engine (P3) nicht verzögern.
+sollten aber die Schnapper-Engine (P3) nicht verzögern. Kein Schritt vor P7 setzt einen Server voraus.
 ```
 
 ### 9.2 Vorgeschlagene Sprints
@@ -604,12 +636,13 @@ sollten aber die Schnapper-Engine (P3) nicht verzögern.
 | **Sprint 0 (Woche 1)** | P0 plus `BUG-01` und `BUG-02` | Go/No-Go der Quellen, korrekte Versand-/Matchlogik |
 | **Sprint 1 (Woche 2)** | P1 übrige Tickets | Modell-/VRAM-/Auktionssupport mit Fixtures |
 | **Sprint 2–3 (Woche 3–4)** | P2 | Stabiler API-/DB-/Worker-Unterbau mit Messung |
-| **Sprint 4 (Woche 5)** | P3 | Live-Schnapper-Feed und Web Push |
+| **Sprint 4 (Woche 5)** | P3 | Live-Schnapper-Feed und Web Push (lokal) |
 | **Sprint 5 (Woche 6)** | P4 | Repair Lab mit Szenariorechner |
 | **Sprint 6 (Woche 7)** | P5 | Preisverläufe und belastbar bezeichnete Statistik |
-| **Sprint 7 (Woche 8)** | P6 | Gehostete, abgesicherte Private Beta |
+| **Sprint 7 (Woche 8)** | P6 | Lokal gehärtete, deploybare Installation |
+| **Sprint 8 (Woche 9)** | P7 | Gehostete, abgesicherte Private Beta mit Live-Abnahme |
 
-**Zeitansatz:** ungefähr **7–9 Wochen** für eine erfahrene Person bei fokussierter Entwicklung *und* verfügbaren Zugangsdaten; Realismusreserve einplanen. Die P0-Benchmarkzeit und externe Freigaben können die Dauer verlängern. Einige Pakete dürfen entfallen oder parallelisiert werden, wenn der Nutzer zunächst nur eBay benötigt.
+**Zeitansatz:** ungefähr **8–10 Wochen** für eine erfahrene Person bei fokussierter Entwicklung *und* verfügbaren Zugangsdaten; Realismusreserve einplanen. Die P0-Benchmarkzeit und externe Freigaben können die Dauer verlängern. Einige Pakete dürfen entfallen oder parallelisiert werden, wenn der Nutzer zunächst nur eBay benötigt.
 
 ### 9.3 Minimaler schneller Weg zu echtem Nutzen
 
@@ -618,8 +651,9 @@ Wer möglichst schnell reale Schnapper statt einer großen Architektur haben mö
 1. Live-eBay mit einer sicheren Single-User-App abnehmen (P0).
 2. Modellmatching, unbekannte Versandkosten, Preis-/Match-Neuberechnung und Auktionen korrigieren (P1).
 3. Stabilen Worker + PostgreSQL nur so weit bauen, wie für 24/7-Betrieb nötig (P2 Kern).
-4. Server-Push und Alert-Dedupe aktivieren (P3).
-5. **Danach** Repair Lab und Charts ausbauen.
+4. Server-Push und Alert-Dedupe aktivieren (P3, lokal).
+5. Repair Lab und Charts nur im nötigen Umfang (P4/P5 Kern).
+6. **Zum Schluss** Härtung lokal (P6) und Server-Inbetriebnahme (P7).
 
 So wird das wichtigste Alleinstellungsmerkmal – rechtzeitig passende, auch defekte Angebote sehen – nicht von Designpolitur blockiert.
 
@@ -789,13 +823,13 @@ DF-... oder keine
 
 ## 15. Nächste konkrete Entwicklerbefehle
 
-Mit dem vorhandenen Prototyp lokal:
+Lokal (bis einschließlich P6 genügt das):
 
 ```bash
-unzip dealforge-mvp.zip
-cd dealforge-mvp
-npm test
-npm start
+docker compose up -d postgres redis
+pnpm install
+pnpm lint && pnpm typecheck && pnpm build && pnpm test
+docker compose up --build -d
 # http://127.0.0.1:3000
 ```
 
@@ -803,11 +837,11 @@ npm start
 
 ```bash
 # Prüft nur, ob Probe-Skript verfügbar ist – kein API-Aufruf.
-npm run probe -- kleinanzeigen
-npm run probe -- facebook
+pnpm probe kleinanzeigen
+pnpm probe facebook
 
 # Erst nach expliziter Freigabe:
-KLAZ_API_KEY='...' PROBE_QUERY='RTX 4070 Super' npm run probe -- kleinanzeigen --live
+KLAZ_API_KEY='...' PROBE_QUERY='RTX 4070 Super' pnpm probe kleinanzeigen --live
 ```
 
 Im neuen Repo zuerst `docs/decisions/001-provider-policy.md`, die ersten 10 Issues und CI anlegen. Den alten Discord-Bot unverändert belassen; später kann er archiviert werden, sobald DealForge die zentralen Suchfunktionen tatsächlich abgelöst hat.
