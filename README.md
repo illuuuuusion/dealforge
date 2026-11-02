@@ -125,7 +125,7 @@ Die App startet in diesem Modus nur mit `APP_PASSWORD`. Ein Scan kann über die 
 
 Nur `https://facebook.com` und die gebräuchlichen Subdomains werden angenommen. Keine Verkäufer-Kontaktdaten speichern. Beispieldaten und echte Inserate sind in der UI unterscheidbar.
 
-## Was fehlt bewusst noch?
+## Was fehlt noch?
 
 Server-Betrieb (24/7, HTTPS, Backups – siehe Randbedingung im Umsetzungsplan), eingehende Provider-Webhooks und serverseitiges Web Push (P3), echte marktplatzübergreifende Angebots-Dubletten, Marktpreise und Preistrends, Auth per OIDC/Passkey, React/Vite-Oberfläche (die bestehende UI wurde nur auf `/api/v1` umgehängt), API-Anbieter-Abnahme. Für den Beta-Betrieb ist außerdem ein Security Review notwendig.
 
