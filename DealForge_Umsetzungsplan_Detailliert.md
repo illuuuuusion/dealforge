@@ -14,7 +14,7 @@
 | P0 Provider/Freigabe | eBay `GO LIMITED` (DF-001/002/005/006 erledigt); Kleinanzeigen `NO GO`, Facebook nur Import – Freigabe offen (DF-003/004) |
 | P1 Korrektheit/Domain | erledigt (Versand, Stale Matches, 49 Profile, Buckets, Auktionen, Zubehörfilter, 69 Fixtures, CI) |
 | P2 Backend/Pipeline | erledigt bis auf den Dauerlauf (→ P7) |
-| P3 Schnapper-Engine | **in Arbeit**: Alert-Engine mit Dedupe, Alert-Liste und SSE-Live-Feed lokal; Web Push als Nächstes |
+| P3 Schnapper-Engine | lokal erledigt (DF-301, 303–308); DF-302 Webhooks wartet auf einen Provider mit Webhooks und `GO`; Geräte-Push-Tests in P7 |
 | P4–P6 | offen, lokal |
 | P7 Server | offen, ganz am Ende |
 

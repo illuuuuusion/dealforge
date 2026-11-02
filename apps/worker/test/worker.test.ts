@@ -2,18 +2,19 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { loadConfig } from '@dealforge/config';
-import { createTestDb, setProviderEnabled, type Db } from '@dealforge/db';
-import { createQueues, redisConnection, enqueuePlan, systemStatus, PRIORITY, type Queues } from '@dealforge/jobs';
+import { createTestDb, setProviderEnabled, createWatchlist, savePushSubscription, markDeliveryShown, alertLatency, type Db } from '@dealforge/db';
+import { createQueues, redisConnection, enqueuePlan, systemStatus, planFor, PRIORITY, type Queues, type PushSend } from '@dealforge/jobs';
 import { ProviderError, type ProviderAdapter, type SearchRequest, type LiveSource, type NormalizedListing } from '@dealforge/providers';
-import { startWorker } from '../src/worker.ts';
+import { startWorker, syncSchedulers } from '../src/worker.ts';
 
-const config = loadConfig({ APPROVED_PROVIDERS: 'ebay,kleinanzeigen', EBAY_APP_ID: 'a', EBAY_CLIENT_SECRET: 'b', KLAZ_API_KEY: 'k',
-  QUEUE_PREFIX: `test-${randomBytes(4).toString('hex')}`, REDIS_URL: process.env.REDIS_URL, PROVIDER_DAILY_CALL_LIMIT: '1000' });
+const env = { APPROVED_PROVIDERS: 'ebay,kleinanzeigen', EBAY_APP_ID: 'a', EBAY_CLIENT_SECRET: 'b', KLAZ_API_KEY: 'k',
+  QUEUE_PREFIX: `test-${randomBytes(4).toString('hex')}`, REDIS_URL: process.env.REDIS_URL, PROVIDER_DAILY_CALL_LIMIT: '1000' };
+const config = loadConfig(env);
 const connection = redisConnection(config.redisUrl);
 let t: Awaited<ReturnType<typeof createTestDb>>, db: Db, queues: Queues;
 before(async () => { t = await createTestDb(); db = t.db; queues = createQueues(connection, config.queuePrefix); });
 after(async () => {
-  for (const q of [queues.plan, ...Object.values(queues.fetch)]) await q.obliterate({ force: true });
+  for (const q of queues.all) await q.obliterate({ force: true });
   await (await queues.plan.client).del(`${config.queuePrefix}:worker:heartbeat`);
   await queues.close(); await t.close();
 });
@@ -26,7 +27,7 @@ const listing = (source: LiveSource, externalId: string): NormalizedListing => (
 const result = (...listings: NormalizedListing[]) => ({ listings, fetchedAt: new Date().toISOString() });
 const adapters: Record<LiveSource, ProviderAdapter> = { ebay: fake('ebay', async () => result()), kleinanzeigen: fake('kleinanzeigen', async () => result()) };
 const fast = { lockDuration: 1000, stalledInterval: 500 };
-const start = (cfg = config) => startWorker({ db, config: cfg, queues, connection, adapters, workerOptions: fast });
+const start = (cfg = config, push?: PushSend) => startWorker({ db, config: cfg, queues, connection, adapters, workerOptions: fast, push });
 const job = (platform: LiveSource, key: string) => ({ platform, query: key, label: key, key: `${platform}|${key}` });
 async function until(check: () => Promise<boolean> | boolean, ms = 8000) {
   const end = Date.now() + ms;
@@ -131,4 +132,57 @@ test('DF-207/DF-209: provider errors and kill switch stay isolated and show up i
   assert.equal(status.providers.find(p => p.source === 'ebay')?.state, 'off');
   await w.close();
   await setProviderEnabled(db, 'ebay', true);
+});
+
+test('DF-303/305/307: a detected listing becomes alerts and one push per subscription; failures retry, expired subscriptions go', async () => {
+  await createWatchlist(db, { name: 'Push 4070S', query: 'RTX 4070 Super', maxWorking: 470, maxDefect: 120, sourceList: ['ebay'] });
+  const sub = (name: string) => ({ endpoint: `https://fcm.googleapis.com/fcm/send/${name}`, keys: { p256dh: 'p', auth: 'a' } });
+  for (const name of ['ok', 'flaky', 'gone']) await savePushSubscription(db, sub(name), null);
+  const sent: { name: string; message: Record<string, unknown> }[] = [];
+  let flaky = 0;
+  const push: PushSend = async (target, payload) => {
+    const name = target.endpoint.split('/').pop()!;
+    sent.push({ name, message: JSON.parse(payload) });
+    return name === 'gone' ? 410 : name === 'flaky' && ++flaky === 1 ? 503 : 201;
+  };
+  adapters.ebay = fake('ebay', async () => result({ ...listing('ebay', 'push-1'), title: 'MSI RTX 4070 Super Ventus 12GB', priceEur: 300, publishedAt: new Date().toISOString() }));
+  const w = await start(config, push);
+  const deliveries = async () => (await db.query(`SELECT d.id, d.status, s.endpoint FROM alert_deliveries d
+    LEFT JOIN push_subscriptions s ON s.id = d.subscription_id ORDER BY d.id`)).rows;
+  // Two alerts (SCHNAPPER, DEAL) x two live subscriptions; the 503 is retried after the job's backoff.
+  await enqueuePlan(queues, [job('ebay', 'push')], PRIORITY.manual);
+  await until(async () => (await deliveries()).filter(d => d.status === 'sent').length === 4, 15000);
+  // A replay of the same listing raises no new alert and no new push.
+  await enqueuePlan(queues, [job('ebay', 'push')], PRIORITY.manual);
+  await until(async () => (await runs('ebay|push')).length === 2);
+  await new Promise(r => setTimeout(r, 300));
+  await w.close();
+  const count = (name: string) => sent.filter(x => x.name === name).length;
+  assert.equal(count('ok'), 2, 'already sent deliveries are not resent on retry');
+  assert.equal(count('flaky'), 3);
+  assert.ok(count('gone') >= 1);
+  assert.equal((await db.query("SELECT count(*) AS n FROM push_subscriptions WHERE endpoint LIKE '%/gone'")).rows[0].n, 0, 'expired subscription removed');
+  assert.deepEqual([...new Set((await deliveries()).map(d => d.status))].sort(), ['gone', 'sent']);
+  const msg = sent.find(x => x.name === 'ok')!.message;
+  assert.match(String(msg.title), /^DealForge: (Schnapper|Preisalarm)$/);
+  assert.equal(msg.url, 'https://www.ebay.de/itm/push-1');
+  assert.equal(typeof msg.deliveryId, 'number');
+  // DF-308: only a service worker receipt makes a delivery "shown"; latency stages become measurable.
+  assert.equal(await markDeliveryShown(db, msg.deliveryId as number), true);
+  const [ebay] = await alertLatency(db);
+  assert.equal(ebay.source, 'ebay'); assert.equal(ebay.samples, 2);
+  assert.ok(ebay.ingest.p50 !== null && ebay.push.p95 !== null && ebay.shown.p50 !== null);
+});
+
+test('DF-301: fast watchlists get their own schedule, only for sources in FAST_PROVIDERS', async () => {
+  const fastConfig = loadConfig({ ...env, FAST_PROVIDERS: 'ebay', ENABLE_SCHEDULER: 'true', FAST_POLL_INTERVAL_SECONDS: '45' });
+  await createWatchlist(db, { name: 'Fast', query: 'steam deck oled', maxWorking: 400, maxDefect: 100, sourceList: ['ebay', 'kleinanzeigen'], fast: true });
+  assert.deepEqual((await planFor(db, fastConfig, 'all', true)).map(p => p.key), ['ebay|steam deck oled']);
+  assert.ok((await planFor(db, fastConfig)).some(p => p.key === 'kleinanzeigen|steam deck oled'), 'standard schedule still covers every source');
+  assert.deepEqual(await planFor(db, config, 'all', true), [], 'no FAST_PROVIDERS, no fast polling');
+  const every = async () => Object.fromEntries((await queues.plan.getJobSchedulers()).map(s => [s.key, s.every]));
+  await syncSchedulers(queues, fastConfig);
+  assert.deepEqual(await every(), { poll: 300000, 'poll-fast': 45000 });
+  await syncSchedulers(queues, config);
+  assert.deepEqual(await every(), {});
 });

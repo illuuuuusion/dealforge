@@ -7,10 +7,12 @@ import type { Config } from '@dealforge/config';
 import * as repo from '@dealforge/db';
 import { profiles } from '@dealforge/domain';
 import { normalizeFacebook } from '@dealforge/providers';
-import { planFor, enqueuePlan, systemStatus, workerOnline, PRIORITY, type Queues } from '@dealforge/jobs';
+import { planFor, enqueuePlan, enqueueAlerts, systemStatus, workerOnline, vapidKeys, createPushSender, deliver, PRIORITY, type Queues, type PushSend } from '@dealforge/jobs';
 
 const webRoot = new URL('../../web/public/', import.meta.url);
-const staticFiles: [string, string, string][] = [['/', 'index.html', 'text/html; charset=utf-8'], ['/app.js', 'app.js', 'application/javascript; charset=utf-8'], ['/styles.css', 'styles.css', 'text/css; charset=utf-8']];
+const staticFiles: [string, string, string][] = [['/', 'index.html', 'text/html; charset=utf-8'], ['/app.js', 'app.js', 'application/javascript; charset=utf-8'],
+  ['/styles.css', 'styles.css', 'text/css; charset=utf-8'], ['/sw.js', 'sw.js', 'application/javascript; charset=utf-8'],
+  ['/manifest.webmanifest', 'manifest.webmanifest', 'application/manifest+json']];
 // Known GPU models for the watchlist form; a query matching one uses profile matching instead of plain text.
 const models = [...new Set(profiles.flatMap(p => [p.family, p.name.replace(/ Repair$/, '')]).filter((m): m is string => !!m))].sort();
 const publicPaths = new Set(['/api/v1/health/live', '/api/v1/health/ready', '/api/v1/auth/login']);
@@ -21,7 +23,7 @@ class HttpError extends Error {
 }
 const notFound = () => new HttpError(404, 'NOT_FOUND', 'Nicht gefunden');
 
-export function buildApp({ config, db, queues }: { config: Config; db: repo.Db; queues: Queues }) {
+export function buildApp({ config, db, queues, push }: { config: Config; db: repo.Db; queues: Queues; push?: PushSend }) {
   if ((!config.demoMode || !['127.0.0.1', 'localhost'].includes(config.host)) && config.appPassword.length < 16) {
     throw Error('Public deployment requires APP_PASSWORD with at least 16 characters');
   }
@@ -162,6 +164,29 @@ export function buildApp({ config, db, queues }: { config: Config; db: repo.Db; 
     await tick();
   });
 
+  app.get('/api/v1/alerts/latency', async req => {
+    const { days } = C.LatencyQuery.parse(req.query);
+    return { days, items: await repo.alertLatency(db, days) };
+  });
+
+  let sender: Promise<PushSend> | null = null;
+  const send: PushSend = async (target, payload) => (await (sender ??= push ? Promise.resolve(push) : createPushSender(db, config.vapidSubject)))(target, payload);
+  app.get('/api/v1/push/public-key', async () => ({ publicKey: (await vapidKeys(db)).publicKey }));
+  app.get('/api/v1/push-subscriptions', async () => ({ items: (await repo.pushSubscriptions(db)).map(s => ({ id: s.id, host: new URL(s.endpoint).hostname,
+    userAgent: s.userAgent, createdAt: s.createdAt, lastSuccessAt: s.lastSuccessAt })) }));
+  app.post('/api/v1/push-subscriptions', async (req, reply) =>
+    reply.code(201).send({ id: await repo.savePushSubscription(db, C.PushSubscriptionCreate.parse(req.body), req.headers['user-agent'] ?? null) }));
+  app.delete('/api/v1/push-subscriptions/:id', async (req, reply) => {
+    if (!await repo.deletePushSubscription(db, idOf(req))) throw notFound();
+    return reply.code(204).send();
+  });
+  app.post('/api/v1/push/test', async () => deliver(db, send, null, { title: 'DealForge: Test-Push', body: `Push funktioniert · ${new Date().toLocaleTimeString('de-DE')}`, tag: 'dealforge-test' }));
+  app.post('/api/v1/push/receipts', async (req, reply) => {
+    if (!await repo.markDeliveryShown(db, C.PushReceipt.parse(req.body).deliveryId)) throw notFound();
+    return reply.code(204).send();
+  });
+  app.get('/api/v1/push/deliveries', async req => ({ items: await repo.recentDeliveries(db, C.AlertsQuery.parse(req.query).limit) }));
+
   app.get('/api/v1/providers/status', async () => systemStatus(db, config, queues));
   app.patch('/api/v1/providers/:source', async req => {
     const { source } = C.SourceParams.parse(req.params), { enabled } = C.ProviderPatch.parse(req.body);
@@ -180,7 +205,9 @@ export function buildApp({ config, db, queues }: { config: Config; db: repo.Db; 
   app.post('/api/v1/import/facebook', async req => {
     const { items } = C.FacebookImport.parse(req.body);
     const normalized = items.map(x => normalizeFacebook((x ?? {}) as Record<string, unknown>)).filter(x => x !== null);
-    return { normalized: normalized.length, ...(await repo.ingestListings(db, normalized)) };
+    const { alertIds, ...summary } = await repo.ingestListings(db, normalized);
+    await enqueueAlerts(queues, alertIds);
+    return { normalized: normalized.length, ...summary };
   });
   return { app, apiRoutes };
 }

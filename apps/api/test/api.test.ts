@@ -14,10 +14,10 @@ let t: Awaited<ReturnType<typeof createTestDb>>, db: Db, queues: Queues, built: 
 before(async () => {
   t = await createTestDb(); db = t.db; await seed(db);
   queues = createQueues(redisConnection(config.redisUrl), config.queuePrefix);
-  built = buildApp({ config, db, queues });
+  built = buildApp({ config, db, queues, push: async target => target.endpoint.endsWith('/gone') ? 410 : 201 });
 });
 after(async () => {
-  for (const q of [queues.plan, ...Object.values(queues.fetch)]) await q.obliterate({ force: true });
+  for (const q of queues.all) await q.obliterate({ force: true });
   await built.app.close(); await queues.close(); await t.close();
 });
 
@@ -144,4 +144,39 @@ test('DF-306: alert list and live SSE stream with Last-Event-ID resume', async (
   await ingestListings(db, [gpu('sse-2')]);
   await until(/event: alert\ndata: .*itm\/sse-2/);
   await reader.cancel();
+});
+
+test('DF-305/DF-307: push subscriptions, test push, receipts and delivery log', async () => {
+  const key = (await call('GET', '/api/v1/push/public-key')).body.publicKey;
+  assert.match(key, /^[A-Za-z0-9_-]{80,}$/);
+  assert.equal((await call('GET', '/api/v1/push/public-key')).body.publicKey, key, 'VAPID key pair is generated once');
+  const sub = (endpoint: string) => ({ endpoint, keys: { p256dh: 'BPk', auth: 'xyz' } });
+  // The server POSTs to the endpoint: anything but a known push service is rejected.
+  for (const bad of ['https://evil.example/push', 'http://fcm.googleapis.com/fcm/send/x', 'https://fcm.googleapis.com.evil.example/x', 'nonsense']) {
+    assert.equal((await call('POST', '/api/v1/push-subscriptions', sub(bad))).status, 400, bad);
+  }
+  const created = await call('POST', '/api/v1/push-subscriptions', sub('https://fcm.googleapis.com/fcm/send/abc'));
+  assert.equal(created.status, 201);
+  assert.equal((await call('POST', '/api/v1/push-subscriptions', sub('https://fcm.googleapis.com/fcm/send/abc'))).body.id, created.body.id, 'idempotent per endpoint');
+  await call('POST', '/api/v1/push-subscriptions', sub('https://updates.push.services.mozilla.com/wpush/v2/gone'));
+  const list = (await call('GET', '/api/v1/push-subscriptions')).body.items;
+  assert.deepEqual(list.map((x: { host: string }) => x.host), ['fcm.googleapis.com', 'updates.push.services.mozilla.com']);
+  assert.equal(JSON.stringify(list).includes('/fcm/send/abc'), false, 'endpoint is not echoed');
+
+  assert.deepEqual((await call('POST', '/api/v1/push/test')).body, { sent: 1, failed: 0, gone: 1, skipped: 0 });
+  assert.equal((await call('GET', '/api/v1/push-subscriptions')).body.items.length, 1, 'expired subscription removed');
+  const [sent] = (await call('GET', '/api/v1/push/deliveries')).body.items.filter((d: { status: string }) => d.status === 'sent');
+  assert.equal(sent.alertId, null); assert.equal(sent.shownAt, null);
+  assert.equal((await call('POST', '/api/v1/push/receipts', { deliveryId: sent.id })).status, 204);
+  assert.equal((await call('POST', '/api/v1/push/receipts', { deliveryId: 99999999 })).status, 404);
+  assert.ok((await call('GET', '/api/v1/push/deliveries')).body.items.find((d: { id: number }) => d.id === sent.id).shownAt);
+
+  assert.equal((await call('DELETE', `/api/v1/push-subscriptions/${created.body.id}`)).status, 204);
+  assert.equal((await call('DELETE', `/api/v1/push-subscriptions/${created.body.id}`)).status, 404);
+  assert.deepEqual((await call('POST', '/api/v1/push/test')).body, { sent: 0, failed: 0, gone: 0, skipped: 0 });
+  const latency = await call('GET', '/api/v1/alerts/latency?days=7');
+  assert.equal(latency.body.days, 7);
+  assert.equal((await call('GET', '/api/v1/alerts/latency?days=0')).status, 400);
+  const sw = await built.app.inject({ method: 'GET', url: '/sw.js' });
+  assert.equal(sw.statusCode, 200); assert.match(sw.body, /push\/receipts/);
 });

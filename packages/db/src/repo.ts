@@ -31,7 +31,7 @@ export async function seed(db: Db, { demoMode = false } = {}) {
 
 const watchFromRow = (x: Row): WatchlistRow => ({ id: x.id, name: x.name, query: x.query, maxWorking: x.max_working, maxDefect: x.max_defect,
   expectedResale: x.expected_resale, repairBudget: x.repair_budget, sourceList: x.sources, allowUnknownShipping: x.allow_unknown_shipping,
-  active: x.active, createdAt: x.created_at });
+  fast: x.fast, active: x.active, createdAt: x.created_at });
 const rulesFromRow = (r: Row): WatchRules => ({ query: r.query, maxWorking: r.max_working, maxDefect: r.max_defect, expectedResale: r.expected_resale,
   repairBudget: r.repair_budget, allowUnknownShipping: r.allow_unknown_shipping });
 
@@ -40,13 +40,13 @@ export async function watchlists(db: Queryable) {
 }
 export async function createWatchlist(db: Db, input: WatchlistCreateInput | unknown) {
   const w = WatchlistCreate.parse(input);
-  const { rows } = await db.query(`INSERT INTO watchlists (name, query, max_working, max_defect, expected_resale, repair_budget, sources, allow_unknown_shipping)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`, [w.name, w.query, w.maxWorking, w.maxDefect, w.expectedResale, w.repairBudget, w.sourceList, w.allowUnknownShipping]);
+  const { rows } = await db.query(`INSERT INTO watchlists (name, query, max_working, max_defect, expected_resale, repair_budget, sources, allow_unknown_shipping, fast)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`, [w.name, w.query, w.maxWorking, w.maxDefect, w.expectedResale, w.repairBudget, w.sourceList, w.allowUnknownShipping, w.fast]);
   await rematchWatchlist(db, rows[0].id);
   return rows[0].id as number;
 }
 const patchColumns: Record<string, string> = { name: 'name', query: 'query', maxWorking: 'max_working', maxDefect: 'max_defect', expectedResale: 'expected_resale',
-  repairBudget: 'repair_budget', sourceList: 'sources', allowUnknownShipping: 'allow_unknown_shipping', active: 'active' };
+  repairBudget: 'repair_budget', sourceList: 'sources', allowUnknownShipping: 'allow_unknown_shipping', fast: 'fast', active: 'active' };
 export async function updateWatchlist(db: Db, id: number, patch: unknown) {
   const p = WatchlistPatch.parse(patch);
   const entries = Object.entries(p);
@@ -114,7 +114,8 @@ export async function ingestListings(db: Db, items: unknown[], { fetchedAt = new
   const valid = items.map(x => validListing(x as Row)).filter(x => x !== null)
     // Stable lock order across concurrent batches avoids deadlocks.
     .sort((a, b) => `${a.source}|${a.externalId}`.localeCompare(`${b.source}|${b.externalId}`));
-  let inserted = 0, matched = 0, priceChanges = 0, alerts = 0;
+  let inserted = 0, matched = 0, priceChanges = 0;
+  const alertIds: number[] = [];
   await tx(db, async c => {
     for (const item of valid) {
       const up = await c.query(`WITH prior AS (SELECT price_eur FROM listings WHERE source = $1 AND external_id = $2)
@@ -157,14 +158,15 @@ export async function ingestListings(db: Db, items: unknown[], { fetchedAt = new
           events.push(['PRICE_DROP', `${row.id}:${w.id}:PRICE_DROP:${item.priceEur}`, [`−${cents(prior - item.priceEur)} € (von ${prior} € auf ${item.priceEur} €)`, ...assessment.reasons]]);
         }
         for (const [kind, key, reasons] of events) {
-          alerts += (await c.query(`INSERT INTO alerts (listing_id, watchlist_id, kind, dedupe_key, priority, reasons) VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (dedupe_key) DO NOTHING`, [row.id, w.id, kind, key, assessment.priority, JSON.stringify(reasons.slice(0, 3))])).rowCount ?? 0;
+          const a = await c.query(`INSERT INTO alerts (listing_id, watchlist_id, kind, dedupe_key, priority, reasons, fetched_at) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (dedupe_key) DO NOTHING RETURNING id`, [row.id, w.id, kind, key, assessment.priority, JSON.stringify(reasons.slice(0, 3)), fetchedAt]);
+          alertIds.push(...a.rows.map(r => r.id as number));
         }
       }
       await c.query('DELETE FROM watchlist_matches WHERE listing_id = $1 AND watchlist_id = ANY($2::int[]) AND NOT (watchlist_id = ANY($3::int[]))', [row.id, activeIds, keep]);
     }
   });
-  return { fetched: items.length, inserted, matched, priceChanges, alerts };
+  return { fetched: items.length, inserted, matched, priceChanges, alerts: alertIds.length, alertIds };
 }
 
 const feedSql = `SELECT l.*, w.name AS watchlist_name, w.id AS watchlist_id, w.query, w.max_working, w.max_defect, w.expected_resale, w.repair_budget, w.allow_unknown_shipping
@@ -200,12 +202,20 @@ export async function listStats(db: Queryable) {
 }
 
 // createdAt minus publishedAt/firstSeenAt is the pipeline latency of an alert (DF-308).
-const alertSql = `SELECT a.*, w.name AS watchlist_name, l.source, l.title, l.url, l.price_eur, l.shipping_eur, l.published_at, l.first_seen_at, l.fetched_at
-  FROM alerts a JOIN listings l ON l.id = a.listing_id LEFT JOIN watchlists w ON w.id = a.watchlist_id`;
+const alertSql = `SELECT a.id, a.kind, a.priority, a.reasons, a.created_at, a.listing_id, a.watchlist_id, coalesce(a.fetched_at, l.fetched_at) AS batch_fetched_at,
+    w.name AS watchlist_name, l.source, l.title, l.url, l.price_eur, l.shipping_eur, l.published_at, l.first_seen_at, d.*
+  FROM alerts a JOIN listings l ON l.id = a.listing_id LEFT JOIN watchlists w ON w.id = a.watchlist_id
+  LEFT JOIN LATERAL (SELECT count(*) FILTER (WHERE status = 'sent') AS push_sent, count(*) FILTER (WHERE shown_at IS NOT NULL) AS push_shown,
+    count(*) FILTER (WHERE status IN ('failed', 'gone')) AS push_failed FROM alert_deliveries WHERE alert_id = a.id) d ON true`;
 const alertFromRow = (r: Row) => ({ id: r.id as number, kind: r.kind as string, priority: r.priority as number, reasons: r.reasons as string[],
   createdAt: r.created_at as string, listingId: r.listing_id as number, watchlistId: r.watchlist_id as number | null, watchlistName: r.watchlist_name as string | null,
   source: r.source as Source, title: r.title as string, url: r.url as string, priceEur: r.price_eur as number, shippingEur: r.shipping_eur as number | null,
-  publishedAt: r.published_at as string | null, firstSeenAt: r.first_seen_at as string, fetchedAt: r.fetched_at as string });
+  publishedAt: r.published_at as string | null, firstSeenAt: r.first_seen_at as string, fetchedAt: r.batch_fetched_at as string,
+  push: { sent: r.push_sent as number, shown: r.push_shown as number, failed: r.push_failed as number } });
+export async function getAlert(db: Queryable, id: number) {
+  const r = (await db.query(`${alertSql} WHERE a.id = $1`, [id])).rows[0];
+  return r ? alertFromRow(r) : null;
+}
 export async function recentAlerts(db: Queryable, limit = 50) {
   return (await db.query(`${alertSql} ORDER BY a.id DESC LIMIT $1`, [limit])).rows.map(alertFromRow);
 }
@@ -273,4 +283,77 @@ export async function providerRunStats(db: Queryable, source: string) {
   return { lastRunAt: s.last_run_at as string | null, lastSuccessAt: s.last_success_at as string | null, runs24h: s.runs24h as number, errors24h: s.errors24h as number,
     lastError: lastError ? { at: lastError.started_at as string, code: lastError.error_code as string | null, message: lastError.message as string | null } : null,
     recentStatuses: recent };
+}
+
+/** Generated once on first use and shared by all processes; concurrent first calls agree on one value. */
+export async function getOrCreateSecret(db: Queryable, name: string, create: () => string) {
+  await db.query('INSERT INTO app_secrets (name, value) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING', [name, create()]);
+  return (await db.query('SELECT value FROM app_secrets WHERE name = $1', [name])).rows[0].value as string;
+}
+
+export interface PushSubscriptionInput { endpoint: string; keys: { p256dh: string; auth: string } }
+export async function savePushSubscription(db: Queryable, s: PushSubscriptionInput, userAgent: string | null) {
+  const { rows } = await db.query(`INSERT INTO push_subscriptions (endpoint, p256dh, auth, user_agent) VALUES ($1, $2, $3, $4)
+    ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, user_agent = EXCLUDED.user_agent RETURNING id`,
+  [s.endpoint, s.keys.p256dh, s.keys.auth, userAgent?.slice(0, 200) ?? null]);
+  return rows[0].id as number;
+}
+/** With keys, for sending; the API only ever returns the push service host. */
+export async function pushSubscriptions(db: Queryable) {
+  return (await db.query('SELECT * FROM push_subscriptions ORDER BY id')).rows.map(r => ({ id: r.id as number, endpoint: r.endpoint as string,
+    keys: { p256dh: r.p256dh as string, auth: r.auth as string }, userAgent: r.user_agent as string | null, createdAt: r.created_at as string,
+    lastSuccessAt: r.last_success_at as string | null }));
+}
+export async function deletePushSubscription(db: Queryable, id: number) {
+  return ((await db.query('DELETE FROM push_subscriptions WHERE id = $1', [id])).rowCount ?? 0) > 0;
+}
+
+/** Idempotent per alert and subscription: a retried job gets the existing delivery back and skips what was already sent. */
+export async function startDelivery(db: Queryable, alertId: number | null, subscriptionId: number) {
+  const { rows: [d] } = await db.query(`INSERT INTO alert_deliveries (alert_id, subscription_id, status) VALUES ($1, $2, 'pending')
+    ON CONFLICT (alert_id, subscription_id) DO UPDATE SET status = alert_deliveries.status RETURNING id, status`, [alertId, subscriptionId]);
+  return { id: d.id as number, status: d.status as string };
+}
+export async function finishDelivery(db: Queryable, id: number, r: { status: 'sent' | 'failed' | 'gone'; httpStatus?: number | null; error?: string | null }) {
+  const { rows: [d] } = await db.query(`UPDATE alert_deliveries SET status = $2, http_status = $3, error = $4, sent_at = CASE WHEN $2 = 'sent' THEN now() END
+    WHERE id = $1 RETURNING subscription_id`, [id, r.status, r.httpStatus ?? null, r.error?.slice(0, 200) ?? null]);
+  if (r.status === 'sent') await db.query('UPDATE push_subscriptions SET last_success_at = now() WHERE id = $1', [d.subscription_id]);
+  // 404/410: the browser dropped the subscription; never send to it again.
+  if (r.status === 'gone') await db.query('DELETE FROM push_subscriptions WHERE id = $1', [d.subscription_id]);
+}
+/** Receipt from the service worker: the notification was actually displayed. */
+export async function markDeliveryShown(db: Queryable, id: number) {
+  return ((await db.query('UPDATE alert_deliveries SET shown_at = coalesce(shown_at, now()) WHERE id = $1', [id])).rowCount ?? 0) > 0;
+}
+export async function recentDeliveries(db: Queryable, limit = 10) {
+  return (await db.query('SELECT * FROM alert_deliveries ORDER BY id DESC LIMIT $1', [limit])).rows.map(r => ({ id: r.id as number,
+    alertId: r.alert_id as number | null, subscriptionId: r.subscription_id as number | null, status: r.status as string, httpStatus: r.http_status as number | null,
+    error: r.error as string | null, createdAt: r.created_at as string, sentAt: r.sent_at as string | null, shownAt: r.shown_at as string | null }));
+}
+
+/**
+ * DF-308: p50/p95 in seconds per source and stage over the last days. Discovery only counts listings published after
+ * the source's first successful run, so the initial backfill of old listings does not distort it.
+ */
+export async function alertLatency(db: Queryable, days = 7) {
+  const { rows } = await db.query(`WITH x AS (
+      SELECT a.id AS alert_id, l.source, a.kind,
+        extract(epoch FROM l.first_seen_at - l.published_at) AS discovery,
+        extract(epoch FROM a.created_at - a.fetched_at) AS ingest,
+        extract(epoch FROM d.sent_at - a.created_at) AS push,
+        extract(epoch FROM d.shown_at - a.created_at) AS shown,
+        l.published_at > (SELECT min(started_at) FROM source_runs r WHERE r.source = l.source AND r.status = 'ok') AS live_published
+      FROM alerts a JOIN listings l ON l.id = a.listing_id LEFT JOIN alert_deliveries d ON d.alert_id = a.id
+      WHERE a.created_at > now() - make_interval(days => $1))
+    SELECT source, count(DISTINCT alert_id) AS n,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY discovery) FILTER (WHERE live_published AND kind <> 'PRICE_DROP') AS discovery_p50,
+      percentile_cont(0.95) WITHIN GROUP (ORDER BY discovery) FILTER (WHERE live_published AND kind <> 'PRICE_DROP') AS discovery_p95,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY ingest) AS ingest_p50, percentile_cont(0.95) WITHIN GROUP (ORDER BY ingest) AS ingest_p95,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY push) AS push_p50, percentile_cont(0.95) WITHIN GROUP (ORDER BY push) AS push_p95,
+      percentile_cont(0.5) WITHIN GROUP (ORDER BY shown) AS shown_p50, percentile_cont(0.95) WITHIN GROUP (ORDER BY shown) AS shown_p95
+    FROM x GROUP BY source ORDER BY source`, [days]);
+  const sec = (v: unknown) => v === null ? null : Math.round(Number(v) * 10) / 10;
+  const pair = (r: Row, k: string) => ({ p50: sec(r[`${k}_p50`]), p95: sec(r[`${k}_p95`]) });
+  return rows.map(r => ({ source: r.source as Source, samples: r.n as number,
+    discovery: pair(r, 'discovery'), ingest: pair(r, 'ingest'), push: pair(r, 'push'), shown: pair(r, 'shown') }));
 }

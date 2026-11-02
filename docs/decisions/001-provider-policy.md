@@ -13,6 +13,7 @@ DealForge bezieht Inserate von eBay, Kleinanzeigen und Facebook Marketplace. Tec
 3. Nicht freigegebene Quellen bleiben in der UI sichtbar und werden als „nicht freigegeben“ angezeigt.
 4. Pro Quelle gilt ein hartes Budget: pro UTC-Tag (`PROVIDER_DAILY_CALL_LIMIT`, Standard 200), pro Kalendermonat (`PROVIDER_MONTHLY_CALL_LIMIT`, 5000) und pro Suchfilter und Tag (`QUERY_DAILY_CALL_LIMIT`, 100). Es wird vor jedem einzelnen Request (auch Retries) gebucht; ist es erreicht, wird kein weiterer Request gesendet.
 4a. Eine freigegebene Quelle lässt sich zur Laufzeit ausschalten (`PATCH /api/v1/providers/:source`); das wirkt ab dem nächsten Job, ohne Neustart.
+4b. Schnell-Modus (häufigeres Polling für Schnapper) nur für Quellen in `FAST_PROVIDERS` (Standard: leer). Eine Quelle kommt dort erst nach einem gemessenen Latenz-Gate (p95 ≤60 s, Plan DF-704) oder als bewusste, dokumentierte Entscheidung hinein; die Budgets gelten unverändert und begrenzen den Takt.
 5. Fällt ein Provider aus, gibt es kein Fallback-Scraping. Captcha-, Login- und Anti-Bot-Schutz werden nie umgangen. Es gibt kein Auto-Buying und kein Auto-Messaging.
 6. Secrets liegen nur in der Server-Umgebung, niemals im Repo, im Browser, in Logs oder in Probe-Berichten.
 

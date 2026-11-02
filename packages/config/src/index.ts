@@ -14,6 +14,11 @@ const schema = z.object({
   DEMO_MODE: str('true').transform(v => v !== 'false'),
   ENABLE_SCHEDULER: str('false').transform(v => v === 'true'),
   POLL_INTERVAL_SECONDS: int(300, 60, 3600),
+  // Fast watchlists (DF-301): own schedule, only for these sources. Empty = fast mode plans nothing.
+  FAST_POLL_INTERVAL_SECONDS: int(60, 30, 3600),
+  FAST_PROVIDERS: list,
+  // Contact for push services (VAPID); the key pair itself is generated once and kept in the database.
+  VAPID_SUBJECT: str('mailto:dealforge@localhost'),
   DATABASE_URL: str('postgres://dealforge:dealforge@127.0.0.1:55432/dealforge'),
   REDIS_URL: str('redis://127.0.0.1:56379'),
   QUEUE_PREFIX: str('dealforge'),
@@ -35,6 +40,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   return {
     host: e.HOST, port: e.PORT, appPassword: e.APP_PASSWORD, sessionSecret: e.SESSION_SECRET, appOrigin: e.APP_ORIGIN,
     demoMode: e.DEMO_MODE, scheduler: e.ENABLE_SCHEDULER, pollSeconds: e.POLL_INTERVAL_SECONDS,
+    fastPollSeconds: e.FAST_POLL_INTERVAL_SECONDS, fastProviders: e.FAST_PROVIDERS, vapidSubject: e.VAPID_SUBJECT,
     databaseUrl: e.DATABASE_URL, redisUrl: e.REDIS_URL, queuePrefix: e.QUEUE_PREFIX,
     ebayAppId: e.EBAY_APP_ID, ebayClientSecret: e.EBAY_CLIENT_SECRET,
     klazKey: e.KLAZ_API_KEY, klazLocationId: e.KLAZ_LOCATION_ID, klazRadiusKm: e.KLAZ_RADIUS_KM,

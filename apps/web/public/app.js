@@ -256,7 +256,7 @@ function providerRow(p,status){
     <small>Letzter Erfolg ${esc(p.lastSuccessAt?timeAgo(p.lastSuccessAt):'nie')} · Fehlerquote 24 h ${p.errorRatePct??0}% (${p.errors24h}/${p.runs24h})${p.lastError?` · zuletzt: ${esc(`${p.lastError.code??''} ${p.lastError.message??''}`.trim().slice(0,90))}`:''}</small>
     ${q?`<small>Queue ${q.waiting} wartend · ${q.active} aktiv${q.rateLimitedMs?` · gedrosselt ${Math.ceil(q.rateLimitedMs/1000)} s`:''}</small>`:''}`;
   const toggle=p.ready&&p.approved?`<button class="action" data-provider="${esc(p.source)}" data-enabled="${p.enabled}">${p.enabled?'Ausschalten':'Einschalten'}</button>`:'';
-  return `<div class="provider"><div><strong>${esc(names[p.source])}</strong><small>${esc(p.status)}</small>${usage}${toggle}</div><span class="status ${p.live&&p.state==='ok'?'ok':''}">${label}</span></div>`;
+  return `<div class="provider"><div><strong>${esc(names[p.source])}</strong><small>${esc(p.status)}${p.fast?` · Schnellquelle alle ${status.scheduler.fastPollSeconds} s`:''}</small>${usage}${toggle}</div><span class="status ${p.live&&p.state==='ok'?'ok':''}">${label}</span></div>`;
 }
 async function loadState(){
   const [base,{items:watches},status]=await Promise.all([api('/state'),api('/watchlists'),api('/providers/status')]);
@@ -274,7 +274,7 @@ async function loadState(){
   if(!$('#watch-filter :checked'))$('#watch-filter input').checked=true;
   syncFilterLabels();
   $('#models').innerHTML=state.models.map(m=>`<option value="${esc(m)}">`).join('');
-  $('#watchlist').innerHTML=state.watchlists.map(x=>`<div class="watch-item ${x.active?'':'inactive'}"><div><strong>${esc(x.name)}</strong><p>${eur(x.maxWorking)} intakt · ${eur(x.maxDefect)} defekt · ${esc(x.sourceList.map(s=>names[s]).join(', '))}${x.allowUnknownShipping?' · Versand unbekannt ok':''}</p></div><div class="watch-buttons"><button title="Aktivieren/deaktivieren" data-watch="toggle" data-active="${x.active}" data-id="${x.id}">${x.active?'Pausieren':'Aktivieren'}</button><button title="Löschen" data-watch="delete" data-id="${x.id}">Löschen</button></div></div>`).join('');
+  $('#watchlist').innerHTML=state.watchlists.map(x=>`<div class="watch-item ${x.active?'':'inactive'}"><div><strong>${esc(x.name)}</strong><p>${eur(x.maxWorking)} intakt · ${eur(x.maxDefect)} defekt · ${esc(x.sourceList.map(s=>names[s]).join(', '))}${x.allowUnknownShipping?' · Versand unbekannt ok':''}${x.fast?' · Schnell-Modus':''}</p></div><div class="watch-buttons"><button title="Aktivieren/deaktivieren" data-watch="toggle" data-active="${x.active}" data-id="${x.id}">${x.active?'Pausieren':'Aktivieren'}</button><button title="Löschen" data-watch="delete" data-id="${x.id}">Löschen</button></div></div>`).join('');
   const worker=status.worker.online?'':`<div class="provider"><div><strong>Worker</strong><small>Kein Heartbeat${status.worker.lastHeartbeatAt?` seit ${esc(timeAgo(status.worker.lastHeartbeatAt))}`:''} – keine Abfragen möglich</small></div><span class="status">AUSFALL</span></div>`;
   $('#provider-list').innerHTML=worker+status.providers.map(p=>providerRow(p,status)).join('');
 }
@@ -282,8 +282,12 @@ const alertLabel={SCHNAPPER:'SCHNAPPER',DEAL:'PREISALARM',REPAIR:'REPAIR',PRICE_
 // Pipeline latency: alert time minus listing time (published, else first seen).
 const latency=a=>{const s=Math.round((Date.parse(a.createdAt)-Date.parse(a.publishedAt||a.firstSeenAt))/1000);return Number.isFinite(s)&&s>=0?` · ${s<120?s+' s':Math.round(s/60)+' Min.'} nach ${a.publishedAt?'Inserat':'Fund'}`:'';};
 async function loadAlerts(){
-  const {items}=await api('/alerts?limit=8');
-  $('#alert-list').innerHTML=items.length?items.map(a=>`<div class="provider"><div><strong><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a></strong><small>${eur(a.priceEur)} · ${esc(names[a.source])}${a.watchlistName?` · ${esc(a.watchlistName)}`:''} · ${esc(timeAgo(a.createdAt))}${latency(a)}</small><small>${a.reasons.slice(0,2).map(esc).join(' · ')}</small></div><span class="status">${alertLabel[a.kind]}</span></div>`).join(''):'<div class="helper">Noch keine Alerts.</div>';
+  const [{items},latencyData,deliveries]=await Promise.all([api('/alerts?limit=8'),api('/alerts/latency'),api('/push/deliveries?limit=5')]);
+  $('#alert-list').innerHTML=items.length?items.map(a=>`<div class="provider"><div><strong><a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a></strong><small>${eur(a.priceEur)} · ${esc(names[a.source])}${a.watchlistName?` · ${esc(a.watchlistName)}`:''} · ${esc(timeAgo(a.createdAt))}${latency(a)}</small><small>${a.reasons.slice(0,2).map(esc).join(' · ')}</small>${a.push.sent||a.push.failed?`<small>Push: ${a.push.sent} versandt · ${a.push.shown} angezeigt${a.push.failed?` · ${a.push.failed} fehlgeschlagen`:''}</small>`:''}</div><span class="status">${alertLabel[a.kind]}</span></div>`).join(''):'<div class="helper">Noch keine Alerts.</div>';
+  const fmt=p=>p.p50===null?'–':`${p.p50}/${p.p95}`;
+  $('#latency').innerHTML=latencyData.items.length?latencyData.items.map(x=>`<div><b>${esc(names[x.source])}</b> (${x.samples} Alerts): Inserat→Fund ${fmt(x.discovery)} · Abruf→Alert ${fmt(x.ingest)} · Alert→Push ${fmt(x.push)} · Alert→angezeigt ${fmt(x.shown)}</div>`).join(''):'Noch keine Messwerte.';
+  const status={pending:'wartet',sent:'versandt',failed:'fehlgeschlagen',gone:'Abo abgelaufen'};
+  $('#delivery-list').innerHTML=deliveries.items.slice(0,5).map(d=>`<div>${d.alertId?`Alert #${d.alertId}`:'Test'} · ${status[d.status]}${d.httpStatus?` (${d.httpStatus})`:''}${d.shownAt?' · angezeigt':''} · ${esc(timeAgo(d.createdAt))}${d.error?` · ${esc(d.error)}`:''}</div>`).join('');
 }
 // Live alerts via SSE; EventSource reconnects on its own and resumes with Last-Event-ID.
 let feedTimer=null;
@@ -291,7 +295,7 @@ function connectEvents(){
   const es=new EventSource('/api/v1/events');
   es.addEventListener('alert',e=>{
     const a=JSON.parse(e.data);
-    if('Notification' in window&&Notification.permission==='granted')new Notification(`DealForge: ${alertLabel[a.kind]}`,{body:`${a.title} · ${eur(a.priceEur)}`,tag:`dealforge-alert-${a.id}`});
+    if(!pushActive&&'Notification' in window&&Notification.permission==='granted')new Notification(`DealForge: ${alertLabel[a.kind]}`,{body:`${a.title} · ${eur(a.priceEur)}`,tag:`dealforge-alert-${a.id}`});
     toast(`${alertLabel[a.kind]}: ${a.title}`);
     clearTimeout(feedTimer);feedTimer=setTimeout(()=>refresh(),500);
   });
@@ -299,16 +303,42 @@ function connectEvents(){
   es.onerror=()=>{if(es.readyState===EventSource.CLOSED)setTimeout(connectEvents,10000);};
 }
 async function refresh(){if(busy)return;busy=true;try{await loadState();await Promise.all([loadFeed(),loadAlerts()]);}catch(e){if(e.message!=='Bitte anmelden')toast(e.message);}finally{busy=false;}}
-$('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/auth/login',{method:'POST',data:{password:$('#password').value}});$('#login').hidden=true;$('#password').value='';await refresh();}catch(ex){$('#login-error').textContent=ex.message;}});
+$('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/auth/login',{method:'POST',data:{password:$('#password').value}});$('#login').hidden=true;$('#password').value='';await refresh();syncPush().catch(()=>{});}catch(ex){$('#login-error').textContent=ex.message;}});
 $('#scan').addEventListener('click',async()=>{if(busy)return;$('#scan').disabled=true;$('#scan span').textContent='Wird geprüft …';try{const r=await api('/admin/scans',{method:'POST',data:{source:'all'}});toast(`${r.queued.length} Abfragen eingeplant${r.deduplicated.length?`, ${r.deduplicated.length} laufen bereits`:''}`);await refresh();}catch(e){toast(e.message);}finally{$('#scan').disabled=false;$('#scan span').textContent='Jetzt prüfen';}});
-$('#notify').addEventListener('click',async()=>{if(!('Notification'in window)){toast('Benachrichtigungen werden hier nicht unterstützt');return;}try{const result=await Notification.requestPermission();toast(result==='granted'?'Browser-Alerts aktiv solange die WebApp geöffnet ist':'Benachrichtigungen nicht erlaubt');}catch(e){toast(e.message);}});
+// Web Push: the service worker shows alerts even when no DealForge tab is open. Without Push API only in-page notifications.
+const pushOk='serviceWorker' in navigator&&'PushManager' in window;
+let pushActive=false;
+const b64url=s=>Uint8Array.from(atob((s+'='.repeat((4-s.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
+const swReg=()=>navigator.serviceWorker.register('/sw.js');
+async function syncPush(){
+  const sub=pushOk?await swReg().then(r=>r.pushManager.getSubscription()).catch(()=>null):null;
+  pushActive=!!sub;
+  // Re-register on every load (idempotent): the server may have lost or expired the subscription.
+  if(sub){const {id}=await api('/push-subscriptions',{method:'POST',data:sub.toJSON()});localStorage.setItem('df-push-id',id);}
+  $('#notify span').textContent=pushActive?'Push aus':'Push-Alerts';
+  $('#push-test').disabled=!pushActive;
+  $('#push-state').textContent=!pushOk?'Dieser Browser unterstützt kein Web Push; Benachrichtigungen nur bei geöffneter Seite.':pushActive?'Push aktiv auf diesem Gerät.':'Push auf diesem Gerät aus.';
+}
+$('#notify').addEventListener('click',async()=>{try{
+  if(!pushOk){if(!('Notification'in window)){toast('Benachrichtigungen werden hier nicht unterstützt');return;}const r=await Notification.requestPermission();toast(r==='granted'?'Browser-Alerts aktiv solange die WebApp geöffnet ist':'Benachrichtigungen nicht erlaubt');return;}
+  const reg=await swReg();let sub=await reg.pushManager.getSubscription();
+  if(sub){const id=localStorage.getItem('df-push-id');if(id)await api(`/push-subscriptions/${Number(id)}`,{method:'DELETE'}).catch(()=>{});await sub.unsubscribe();localStorage.removeItem('df-push-id');toast('Push-Alerts aus');}
+  else{
+    if(await Notification.requestPermission()!=='granted'){toast('Benachrichtigungen nicht erlaubt');return;}
+    const {publicKey}=await api('/push/public-key');
+    sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64url(publicKey)});
+    toast('Push-Alerts aktiv – auch ohne geöffneten Tab');
+  }
+  await syncPush();
+}catch(e){toast(e.message);}});
+$('#push-test').addEventListener('click',async()=>{try{const r=await api('/push/test',{method:'POST'});toast(`Test-Push: ${r.sent} versandt${r.failed?`, ${r.failed} fehlgeschlagen`:''}${r.gone?`, ${r.gone} Abo abgelaufen`:''}`);setTimeout(()=>loadAlerts().catch(()=>{}),3000);}catch(e){toast(e.message);}});
 document.querySelectorAll('.nav [data-view]').forEach(el=>el.addEventListener('click',()=>{mode=el.dataset.view;document.querySelectorAll('.nav [data-view]').forEach(x=>x.classList.toggle('active',x===el));$('#current-view').textContent=views[mode];loadFeed().catch(e=>toast(e.message));}));
 $('#focus-watchlists').addEventListener('click',()=>$('#watch-panel').scrollIntoView({behavior:'smooth'}));
 $('#feed-filters').addEventListener('change',e=>{if(e.target.type==='radio')e.target.closest('details').open=false;syncFilterLabels();loadFeed().catch(e=>toast(e.message));});
 document.addEventListener('click',e=>document.querySelectorAll('.dd[open]').forEach(d=>{if(!d.contains(e.target))d.open=false;}));
-$('#watch-form').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);try{const input={name:f.get('name'),query:f.get('query'),maxWorking:Number(f.get('maxWorking')),maxDefect:Number(f.get('maxDefect')),expectedResale:f.get('expectedResale')?Number(f.get('expectedResale')):null,repairBudget:Number(f.get('repairBudget')),sourceList:f.getAll('sourceList'),allowUnknownShipping:f.get('allowUnknownShipping')==='on'};await api('/watchlists',{method:'POST',data:input});e.target.reset();toast('Profil erstellt');await refresh();}catch(e){toast(e.message);}});
+$('#watch-form').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);try{const input={name:f.get('name'),query:f.get('query'),maxWorking:Number(f.get('maxWorking')),maxDefect:Number(f.get('maxDefect')),expectedResale:f.get('expectedResale')?Number(f.get('expectedResale')):null,repairBudget:Number(f.get('repairBudget')),sourceList:f.getAll('sourceList'),allowUnknownShipping:f.get('allowUnknownShipping')==='on',fast:f.get('fast')==='on'};await api('/watchlists',{method:'POST',data:input});e.target.reset();toast('Profil erstellt');await refresh();}catch(e){toast(e.message);}});
 $('#watchlist').addEventListener('click',async e=>{const btn=e.target.closest('[data-watch]');if(!btn)return;const id=Number(btn.dataset.id);try{if(btn.dataset.watch==='toggle')await api(`/watchlists/${id}`,{method:'PATCH',data:{active:btn.dataset.active!=='true'}});else if(confirm('Suchprofil wirklich löschen?'))await api(`/watchlists/${id}`,{method:'DELETE'});await refresh();}catch(e){toast(e.message);}});
 $('#feed').addEventListener('click',async e=>{const btn=e.target.closest('[data-action]');if(!btn)return;try{await api(`/listings/${Number(btn.dataset.id)}/user-state`,{method:'PATCH',data:{status:btn.dataset.action}});await refresh();}catch(e){toast(e.message);}});
 $('#import').addEventListener('click',async()=>{try{const json=JSON.parse($('#import-json').value);const rows=Array.isArray(json)?json:(Array.isArray(json.items)?json.items:null);if(!rows)throw Error('JSON-Array erwartet');const r=await api('/import/facebook',{method:'POST',data:{items:rows}});$('#import-message').textContent=`${r.normalized} Datensätze validiert, ${r.inserted} neue Inserate gespeichert`;await refresh();}catch(e){toast(e.message);}});
 $('#provider-list').addEventListener('click',async e=>{const btn=e.target.closest('[data-provider]');if(!btn)return;try{await api(`/providers/${btn.dataset.provider}`,{method:'PATCH',data:{enabled:btn.dataset.enabled!=='true'}});await refresh();}catch(e){toast(e.message);}});
-syncFilterLabels();refresh().then(connectEvents);setInterval(refresh,15000);
+syncFilterLabels();refresh().then(()=>{connectEvents();syncPush().catch(e=>toast(e.message));});setInterval(refresh,15000);

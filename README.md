@@ -62,7 +62,10 @@ Der Import übernimmt Suchprofile, Inserate, Treffer, Preisverlauf und Läufe mi
 - Facebook Marketplace ausschließlich über manuellen JSON-Testdatenimport. Keine ungeprüfte automatische Datenbeschaffung
 - Worker mit Poll-Scheduler, manuellem Scan, Budget-Gate, Laufzeitschalter je Quelle und Systemstatus
 - Alert-Engine: `SCHNAPPER`, `DEAL`, `REPAIR` höchstens einmal je Inserat und Suchprofil, `PRICE_DROP` (≥5 % gesunken, innerhalb der Kaufgrenze) einmal je neuem Preis – wiederholte Jobs und Replays erzeugen keine Dubletten
-- Live-Alerts per Server-Sent Events (`/api/v1/events`, Fortsetzung über `Last-Event-ID`) und Browser-Notifications bei **geöffneter Seite**; noch kein serverseitiges Web Push
+- Live-Alerts per Server-Sent Events (`/api/v1/events`, Fortsetzung über `Last-Event-ID`)
+- Web Push (VAPID, Service Worker): „Push-Alerts“ abonniert das Gerät, Alerts kommen auch ohne geöffneten Tab. Je Alert ein Dispatch-Job mit Retry; abgelaufene Abos (404/410) werden entfernt. Zustellungslog: versandt = vom Push-Dienst angenommen, angezeigt = Empfangsbestätigung des Service Workers. Ohne Push-API fällt die App auf Notifications bei geöffneter Seite zurück
+- Latenz je Quelle (p50/p95, 7 Tage): Inserat→Fund, Abruf→Alert, Alert→Push, Alert→angezeigt
+- Schnell-Modus je Suchprofil: eigener Abfragetakt (`FAST_POLL_INTERVAL_SECONDS`, Standard 60 s) nur für Quellen in `FAST_PROVIDERS`; Budgets gelten weiter
 - `node:test`-Tests (Domain, Provider, Datenbank, Worker, API-Contract) und explizite, optionale Live-Provider-Probes
 
 ## Datenquellen
@@ -128,7 +131,7 @@ Nur `https://facebook.com` und die gebräuchlichen Subdomains werden angenommen.
 
 ## Was fehlt noch?
 
-Server-Betrieb (24/7, HTTPS, Backups – siehe Randbedingung im Umsetzungsplan), serverseitiges Web Push (P3), eingehende Provider-Webhooks (erst mit Server, P7), echte marktplatzübergreifende Angebots-Dubletten, Marktpreise und Preistrends, Auth per OIDC/Passkey, React/Vite-Oberfläche (die bestehende UI wurde nur auf `/api/v1` umgehängt), API-Anbieter-Abnahme. Für den Beta-Betrieb ist außerdem ein Security Review notwendig.
+Server-Betrieb (24/7, HTTPS, Backups – siehe Randbedingung im Umsetzungsplan), eingehende Provider-Webhooks und Push-Tests auf Mobilgeräten (erst mit Server, P7), echte marktplatzübergreifende Angebots-Dubletten, Marktpreise und Preistrends, Auth per OIDC/Passkey, React/Vite-Oberfläche (die bestehende UI wurde nur auf `/api/v1` umgehängt), API-Anbieter-Abnahme. Für den Beta-Betrieb ist außerdem ein Security Review notwendig.
 
 Die Roadmap und Abnahmekriterien stehen in [`DealForge_Umsetzungsplan_Detailliert.md`](DealForge_Umsetzungsplan_Detailliert.md).
 
@@ -155,7 +158,9 @@ Vollständig als OpenAPI 3.1 unter `GET /api/v1/openapi.json` (aus den Zod-Contr
 - `GET|POST /api/v1/watchlists`, `PATCH|DELETE /api/v1/watchlists/:id`
 - `GET /api/v1/listings?mode=all|schnapper|deal|repair&source=…&watchlistId=…&limit=…&cursor=…`, `GET /api/v1/listings/:id`
 - `PATCH /api/v1/listings/:id/user-state` mit `new`, `saved`, `dismissed`, `contacted`, `purchased`
-- `GET /api/v1/alerts?limit=…` (neueste zuerst), `GET /api/v1/events` (SSE, `event: alert`)
+- `GET /api/v1/alerts?limit=…` (neueste zuerst), `GET /api/v1/alerts/latency?days=…`, `GET /api/v1/events` (SSE, `event: alert`)
+- `GET /api/v1/push/public-key`, `GET|POST /api/v1/push-subscriptions`, `DELETE /api/v1/push-subscriptions/:id` (nur bekannte Push-Dienste: FCM, Mozilla, Apple, WNS)
+- `POST /api/v1/push/test`, `POST /api/v1/push/receipts` (Service Worker), `GET /api/v1/push/deliveries`
 - `POST /api/v1/admin/scans` (`{"source":"all"}`) → `202`, `409` bei laufendem Scan, `429` bei erschöpftem Budget
 - `POST /api/v1/import/facebook` (`{"items":[...]}`)
 

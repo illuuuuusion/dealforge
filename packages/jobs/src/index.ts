@@ -5,8 +5,11 @@ import type { Config } from '@dealforge/config';
 import { watchlists, disabledProviders, budgetExhausted, providerUsage, providerRunStats, type Db } from '@dealforge/db';
 import { planScan, providerReady, LIVE_SOURCES, type LiveSource, type PlannedQuery } from '@dealforge/providers';
 
-export const PRIORITY = { manual: 1, scheduled: 10 };
+export * from './push.ts';
+
+export const PRIORITY = { manual: 1, fast: 5, scheduled: 10 };
 export const POLL_SCHEDULER_ID = 'poll';
+export const FAST_POLL_SCHEDULER_ID = 'poll-fast';
 
 export function redisConnection(url: string): ConnectionOptions {
   const u = new URL(url);
@@ -15,14 +18,29 @@ export function redisConnection(url: string): ConnectionOptions {
 }
 
 export function createQueues(connection: ConnectionOptions, prefix: string) {
-  const plan = new Queue<{ source: string }>('plan', { connection, prefix });
+  const plan = new Queue<PlanJob>('plan', { connection, prefix });
   const fetch = Object.fromEntries(LIVE_SOURCES.map(s => [s, new Queue<PlannedQuery>(`fetch-${s}`, { connection, prefix })])) as Record<LiveSource, Queue<PlannedQuery>>;
-  return { prefix, plan, fetch, close: () => Promise.all([plan, ...Object.values(fetch)].map(q => q.close())).then(() => {}) };
+  const alerts = new Queue<{ alertId: number }>('alerts', { connection, prefix });
+  const all = [plan, alerts, ...Object.values(fetch)];
+  return { prefix, plan, fetch, alerts, all, close: () => Promise.all(all.map(q => q.close())).then(() => {}) };
 }
 export type Queues = ReturnType<typeof createQueues>;
 
-export async function planFor(db: Db, config: Config, source = 'all') {
-  return planScan(await watchlists(db), providerReady(config, await disabledProviders(db)), source);
+export interface PlanJob { source: string; fast?: boolean }
+/** fast = only fast watchlists, and only their sources allowed in FAST_PROVIDERS (DF-301). */
+export async function planFor(db: Db, config: Config, source = 'all', fast = false) {
+  const watches = (await watchlists(db)).filter(w => !fast || w.fast)
+    .map(w => fast ? { ...w, sourceList: w.sourceList.filter(s => config.fastProviders.includes(s)) } : w);
+  return planScan(watches, providerReady(config, await disabledProviders(db)), source);
+}
+/**
+ * One dispatch job per new alert (event flow adapter -> ingest -> alert -> push). Failed sends are retried with backoff.
+ * ponytail: an alert committed while Redis is down is never pushed (still in feed and SSE); add a sweep for undelivered alerts if that matters.
+ */
+export async function enqueueAlerts(queues: Queues, alertIds: number[]) {
+  if (!alertIds.length) return;
+  await queues.alerts.addBulk(alertIds.map(alertId => ({ name: 'dispatch', data: { alertId },
+    opts: { jobId: `alert-${alertId}`, attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: 100, removeOnFail: 100 } })));
 }
 /** One job per provider query. The query key deduplicates: while a job for it waits or runs, no second one is added. */
 export async function enqueuePlan(queues: Queues, plan: PlannedQuery[], priority: number) {
@@ -75,8 +93,8 @@ export async function systemStatus(db: Db, config: Config, queues: Queues, now =
     const failing = stats.recentStatuses.length >= 3 && stats.recentStatuses.every(s => s === 'error');
     const state = !p.live ? 'off' : !online || failing || stale ? 'down' : !stats.lastRunAt ? 'idle'
       : (errorRatePct ?? 0) > 20 || exhausted || (queue?.rateLimitedMs ?? 0) > 0 ? 'degraded' : 'ok';
-    providers.push({ source, ...p, state, lastRunAt: stats.lastRunAt, lastSuccessAt: stats.lastSuccessAt, lastError: stats.lastError,
+    providers.push({ source, ...p, fast: live && config.fastProviders.includes(source), state, lastRunAt: stats.lastRunAt, lastSuccessAt: stats.lastSuccessAt, lastError: stats.lastError,
       runs24h: stats.runs24h, errors24h: stats.errors24h, errorRatePct, callsToday: usage.today, callsMonth: usage.month, budgetExhausted: exhausted, queue });
   }
-  return { providers, worker: { online, lastHeartbeatAt: heartbeat }, scheduler: { enabled: config.scheduler, pollSeconds: config.pollSeconds }, limits: config.limits };
+  return { providers, worker: { online, lastHeartbeatAt: heartbeat }, scheduler: { enabled: config.scheduler, pollSeconds: config.pollSeconds, fastPollSeconds: config.fastPollSeconds }, limits: config.limits };
 }

@@ -16,6 +16,8 @@ const watchlistFields = {
   repairBudget: money,
   sourceList: z.array(Source).min(1).max(3),
   allowUnknownShipping: z.boolean(),
+  // Fast mode: own, shorter poll schedule for sources allowed in FAST_PROVIDERS (DF-301).
+  fast: z.boolean(),
 };
 export const WatchlistCreate = z.object({
   ...watchlistFields,
@@ -23,6 +25,7 @@ export const WatchlistCreate = z.object({
   repairBudget: money.default(0),
   sourceList: watchlistFields.sourceList.default(['ebay']),
   allowUnknownShipping: z.boolean().default(false),
+  fast: z.boolean().default(false),
 });
 export const WatchlistPatch = z.object({ ...watchlistFields, active: z.boolean() }).partial()
   .refine(o => Object.keys(o).length > 0, 'Mindestens ein Feld angeben');
@@ -78,14 +81,33 @@ export const Alert = z.object({
   id: z.number().int(), kind: z.enum(['SCHNAPPER', 'DEAL', 'REPAIR', 'PRICE_DROP']), priority: z.number().int(), reasons: z.array(z.string()), createdAt: isoTime,
   listingId: z.number().int(), watchlistId: z.number().int().nullable(), watchlistName: z.string().nullable(), source: Source, title: z.string(), url: z.string(),
   priceEur: z.number(), shippingEur: z.number().nullable(), publishedAt: isoTime.nullable(), firstSeenAt: isoTime, fetchedAt: isoTime,
+  push: z.object({ sent: z.number().int(), shown: z.number().int(), failed: z.number().int() }),
 });
 export const AlertsQuery = z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) });
+const percentiles = z.object({ p50: z.number().nullable(), p95: z.number().nullable() });
+export const LatencyQuery = z.object({ days: z.coerce.number().int().min(1).max(90).default(7) });
+export const AlertLatency = z.object({ days: z.number().int(), items: z.array(z.object({
+  source: Source, samples: z.number().int(), discovery: percentiles, ingest: percentiles, push: percentiles, shown: percentiles })) });
+
+// The server POSTs to the endpoint: only known browser push services, never arbitrary hosts (SSRF).
+const pushHosts = /(^|\.)(fcm\.googleapis\.com|push\.services\.mozilla\.com|push\.apple\.com|notify\.windows\.com)$/;
+export const PushSubscriptionCreate = z.object({
+  endpoint: z.string().max(1000).refine(v => { try { const u = new URL(v); return u.protocol === 'https:' && pushHosts.test(u.hostname); } catch { return false; } },
+    'Kein bekannter Push-Dienst (https)'),
+  keys: z.object({ p256dh: z.string().min(1).max(200), auth: z.string().min(1).max(100) }),
+});
+export const PushSubscriptionItem = z.object({ id: z.number().int(), host: z.string(), userAgent: z.string().nullable(), createdAt: isoTime, lastSuccessAt: isoTime.nullable() });
+export const PushResult = z.object({ sent: z.number().int(), failed: z.number().int(), gone: z.number().int(), skipped: z.number().int() });
+export const PushReceipt = z.object({ deliveryId: z.number().int().positive() });
+export const Delivery = z.object({ id: z.number().int(), alertId: z.number().int().nullable(), subscriptionId: z.number().int().nullable(),
+  status: z.enum(['pending', 'sent', 'failed', 'gone']), httpStatus: z.number().int().nullable(), error: z.string().nullable(),
+  createdAt: isoTime, sentAt: isoTime.nullable(), shownAt: isoTime.nullable() });
 export const Login = z.object({ password: z.string().max(1024) });
 export const ProviderPatch = z.object({ enabled: z.boolean() });
 
 const count = z.number().int().min(0);
 export const ProviderHealth = z.object({
-  source: Source, ready: z.boolean(), approved: z.boolean(), enabled: z.boolean(), live: z.boolean(), kind: z.string(), status: z.string(),
+  source: Source, ready: z.boolean(), approved: z.boolean(), enabled: z.boolean(), live: z.boolean(), fast: z.boolean(), kind: z.string(), status: z.string(),
   state: z.enum(['off', 'idle', 'ok', 'degraded', 'down']),
   lastRunAt: isoTime.nullable(), lastSuccessAt: isoTime.nullable(),
   lastError: z.object({ at: isoTime, code: z.string().nullable(), message: z.string().nullable() }).nullable(),
@@ -96,7 +118,7 @@ export const ProviderHealth = z.object({
 export const SystemStatus = z.object({
   providers: z.array(ProviderHealth),
   worker: z.object({ online: z.boolean(), lastHeartbeatAt: isoTime.nullable() }),
-  scheduler: z.object({ enabled: z.boolean(), pollSeconds: z.number().int() }),
+  scheduler: z.object({ enabled: z.boolean(), pollSeconds: z.number().int(), fastPollSeconds: z.number().int() }),
   limits: z.object({ daily: count, monthly: count, perQueryDaily: count }),
 });
 export const DashboardState = z.object({
@@ -133,6 +155,14 @@ export const routes: RouteContract[] = [
   { method: 'PATCH', path: '/api/v1/listings/:id/user-state', summary: 'saved, dismissed, contacted, purchased', params: IdParams, body: UserStatePatch, responses: { 200: Ok, 400: E, 404: E } },
   { method: 'GET', path: '/api/v1/alerts', summary: 'Ausgelöste Alerts, neueste zuerst', query: AlertsQuery, responses: { 200: z.object({ items: z.array(Alert) }), 400: E } },
   { method: 'GET', path: '/api/v1/events', summary: 'Live-Alerts als Server-Sent Events (text/event-stream): event alert, id = Alert-ID, Last-Event-ID setzt fort', responses: { 200: null } },
+  { method: 'GET', path: '/api/v1/alerts/latency', summary: 'p50/p95 in Sekunden je Quelle: Inserat→Fund, Abruf→Alert, Alert→Push, Alert→angezeigt', query: LatencyQuery, responses: { 200: AlertLatency, 400: E } },
+  { method: 'GET', path: '/api/v1/push/public-key', summary: 'VAPID-Public-Key für pushManager.subscribe', responses: { 200: z.object({ publicKey: z.string() }) } },
+  { method: 'GET', path: '/api/v1/push-subscriptions', summary: 'Registrierte Push-Abos (nur Host des Push-Dienstes)', responses: { 200: z.object({ items: z.array(PushSubscriptionItem) }) } },
+  { method: 'POST', path: '/api/v1/push-subscriptions', summary: 'Browser-Push-Abo speichern (idempotent je Endpoint)', body: PushSubscriptionCreate, responses: { 201: z.object({ id: z.number().int() }), 400: E } },
+  { method: 'DELETE', path: '/api/v1/push-subscriptions/:id', summary: 'Push-Abo entfernen', params: IdParams, responses: { 204: null, 404: E } },
+  { method: 'POST', path: '/api/v1/push/test', summary: 'Test-Push an alle Abos senden', responses: { 200: PushResult } },
+  { method: 'POST', path: '/api/v1/push/receipts', summary: 'Empfangsbestätigung des Service Workers: Benachrichtigung angezeigt', body: PushReceipt, responses: { 204: null, 400: E, 404: E } },
+  { method: 'GET', path: '/api/v1/push/deliveries', summary: 'Zustellungslog: erstellt, versandt, angezeigt, fehlgeschlagen', query: AlertsQuery, responses: { 200: z.object({ items: z.array(Delivery) }), 400: E } },
   { method: 'GET', path: '/api/v1/providers/status', summary: 'Systemstatus: Quellen, Queues, Quoten, Worker', responses: { 200: SystemStatus } },
   { method: 'PATCH', path: '/api/v1/providers/:source', summary: 'Quelle zur Laufzeit ein-/ausschalten', params: SourceParams, body: ProviderPatch, responses: { 200: Ok, 400: E } },
   { method: 'POST', path: '/api/v1/admin/scans', summary: 'Manuellen Scan einplanen', body: ScanRequest, responses: { 202: ScanAccepted, 409: E, 429: E } },
