@@ -7,7 +7,7 @@ import { createTestDb, seed, reserveProviderCall, type Db } from '@dealforge/db'
 import { createQueues, redisConnection, type Queues } from '@dealforge/jobs';
 import { buildApp } from '../src/app.ts';
 
-const config = loadConfig({ APP_PASSWORD: 'correct-horse-battery', DEMO_MODE: 'false', APPROVED_PROVIDERS: 'ebay', EBAY_APP_ID: 'a', EBAY_CLIENT_SECRET: 'b',
+const config = loadConfig({ APP_PASSWORD: 'correct-horse-battery', APP_ORIGIN: 'http://localhost:3000', DEMO_MODE: 'false', APPROVED_PROVIDERS: 'ebay', EBAY_APP_ID: 'a', EBAY_CLIENT_SECRET: 'b',
   QUEUE_PREFIX: `test-${randomBytes(4).toString('hex')}`, REDIS_URL: process.env.REDIS_URL, PROVIDER_DAILY_CALL_LIMIT: '50' });
 let t: Awaited<ReturnType<typeof createTestDb>>, db: Db, queues: Queues, built: ReturnType<typeof buildApp>, cookie = '';
 before(async () => {
@@ -55,6 +55,13 @@ test('Auth, CSRF header and error shape', async () => {
   assert.equal(anon.body.code, 'UNAUTHORIZED'); assert.ok(anon.body.requestId);
   assert.equal((await call('POST', '/api/v1/auth/login', { password: 'wrong-password-123' }, { auth: false })).status, 401);
   assert.equal((await call('POST', '/api/v1/watchlists', {}, { action: false })).status, 403);
+  // Browser login: APP_ORIGIN and its loopback twin pass, foreign origins do not.
+  const loginFrom = async (origin: string) => (await built.app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { password: config.appPassword },
+    headers: { 'x-dealforge-action': '1', origin } })).statusCode;
+  assert.equal(await loginFrom('http://localhost:3000'), 200);
+  assert.equal(await loginFrom('http://127.0.0.1:3000'), 200);
+  assert.equal(await loginFrom('http://127.0.0.1:4000'), 403);
+  assert.equal(await loginFrom('https://evil.example'), 403);
   assert.equal((await call('GET', '/api/v1/watchlists')).status, 200);
   assert.equal((await call('GET', '/api/v1/health/live', undefined, { auth: false })).status, 200);
   const ready = await call('GET', '/api/v1/health/ready', undefined, { auth: false });

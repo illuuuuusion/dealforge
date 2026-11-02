@@ -38,11 +38,19 @@ export function buildApp({ config, db, queues }: { config: Config; db: repo.Db; 
     const expected = Buffer.from(sign(expiration), 'hex'), got = Buffer.from(tag, 'hex');
     return expected.length === got.length && timingSafeEqual(expected, got) && Date.now() < Number(expiration);
   }
+  // localhost and 127.0.0.1 are different browser origins for the same local app: accept both.
+  const loopbackTwin = (origin: string) => {
+    try {
+      const u = new URL(origin), twin = { localhost: '127.0.0.1', '127.0.0.1': 'localhost' }[u.hostname];
+      return twin ? `${u.protocol}//${twin}${u.port ? `:${u.port}` : ''}` : null;
+    } catch { return null; }
+  };
   function mutationAllowed(req: FastifyRequest) {
     if (req.headers['x-dealforge-action'] !== '1') return false;
     const origin = req.headers.origin;
     if (!origin) return true; // scripts/curl require session and custom header
-    return origin === (config.appOrigin || `http://${req.headers.host}`);
+    const expected = config.appOrigin || `http://${req.headers.host}`;
+    return origin === expected || origin === loopbackTwin(expected);
   }
 
   const app = Fastify({ bodyLimit: 1024 * 1024, genReqId: () => randomBytes(8).toString('hex') });
