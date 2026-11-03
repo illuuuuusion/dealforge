@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, repairAssessment, matchesWatchlist, scoreListing as score } from '../src/scoring.ts';
+import { classify, repairAssessment, matchesWatchlist, scoreListing as score } from '../src/index.ts';
 // Non-null for typing only: tests that expect null still see null.
 const scoreListing=(...args: Parameters<typeof score>)=>score(...args)!;
 const w={query:'RTX 4070 Super',maxWorking:450,maxDefect:130,expectedResale:500,repairBudget:50};

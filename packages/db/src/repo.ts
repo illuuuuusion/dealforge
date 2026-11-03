@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { scoreListing, matchesWatchlist, classify, detectModel, EVALUATION_VERSION, SOURCES, type Source, type WatchRules } from '@dealforge/domain';
-import { WatchlistCreate, WatchlistPatch, ListingStatus, type WatchlistCreateInput, type WatchlistRow } from '@dealforge/contracts';
+import { scoreListing, matchesWatchlist, classify, detectModel, repairAssessment, repairScenarios, repairActual, repairStats as statsOf, EVALUATION_VERSION, SOURCES,
+  type Source, type WatchRules, type RepairSettings, type Fault, type RepairOutcome } from '@dealforge/domain';
+import { WatchlistCreate, WatchlistPatch, ListingStatus, RepairSettings as RepairSettingsSchema, RepairProjectPatch, type WatchlistCreateInput, type WatchlistRow } from '@dealforge/contracts';
 import { tx, type Db, type Queryable } from './pool.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- database rows and untrusted import payloads
@@ -356,4 +357,76 @@ export async function alertLatency(db: Queryable, days = 7) {
   const pair = (r: Row, k: string) => ({ p50: sec(r[`${k}_p50`]), p95: sec(r[`${k}_p95`]) });
   return rows.map(r => ({ source: r.source as Source, samples: r.n as number,
     discovery: pair(r, 'discovery'), ingest: pair(r, 'ingest'), push: pair(r, 'push'), shown: pair(r, 'shown') }));
+}
+
+export async function repairSettings(db: Queryable): Promise<RepairSettings> {
+  const s = (await db.query('SELECT * FROM repair_settings')).rows[0];
+  const costs = (await db.query('SELECT * FROM repair_costs ORDER BY fault, model')).rows.map(r => ({ fault: r.fault as Fault, model: r.model as string,
+    partsMin: r.parts_min as number, partsMax: r.parts_max as number, hoursMin: r.hours_min as number, hoursMax: r.hours_max as number }));
+  return { hourlyRateEur: s.hourly_rate, saleFeePct: s.sale_fee_pct, resaleShippingEur: s.resale_shipping, costs };
+}
+/** Replaces all assumptions at once: what the form shows is exactly what is stored. */
+export async function saveRepairSettings(db: Db, input: unknown) {
+  const s = RepairSettingsSchema.parse(input);
+  await tx(db, async c => {
+    await c.query('UPDATE repair_settings SET hourly_rate = $1, sale_fee_pct = $2, resale_shipping = $3', [s.hourlyRateEur, s.saleFeePct, s.resaleShippingEur]);
+    await c.query('DELETE FROM repair_costs');
+    for (const r of s.costs) await c.query('INSERT INTO repair_costs (fault, model, parts_min, parts_max, hours_min, hours_max) VALUES ($1, $2, $3, $4, $5, $6)',
+      [r.fault, r.model, r.partsMin, r.partsMax, r.hoursMin, r.hoursMax]);
+  });
+  return repairSettings(db);
+}
+
+const projectFromRow = (r: Row, s: RepairSettings) => {
+  const p = { id: r.id as number, listingId: r.listing_id as number | null, url: r.url as string | null, title: r.title as string, model: r.model as string | null,
+    faults: r.faults as Fault[], status: r.status as string, outcome: r.outcome as RepairOutcome, purchasePriceEur: r.purchase_price as number,
+    purchaseShippingEur: r.purchase_shipping as number | null, purchasedAt: r.purchased_at as string | null, parts: r.parts as { name: string; costEur: number }[],
+    hoursSpent: r.hours_spent as number, resaleEstimateEur: r.resale_estimate as number | null, salvageEstimateEur: r.salvage_estimate as number,
+    soldPriceEur: r.sold_price as number | null, soldFeesEur: r.sold_fees as number | null, soldShippingEur: r.sold_shipping as number | null,
+    soldAt: r.sold_at as string | null, notes: r.notes as string, createdAt: r.created_at as string, updatedAt: r.updated_at as string };
+  return { ...p,
+    plan: repairScenarios({ purchaseEur: p.purchasePriceEur, shippingEur: p.purchaseShippingEur, faults: p.faults, model: p.model,
+      resaleEur: p.resaleEstimateEur, salvageEur: p.salvageEstimateEur }, s),
+    actual: repairActual({ purchaseEur: p.purchasePriceEur, shippingEur: p.purchaseShippingEur, partsEur: p.parts.map(x => x.costEur), hours: p.hoursSpent,
+      soldEur: p.soldPriceEur, soldFeesEur: p.soldFeesEur, soldShippingEur: p.soldShippingEur, closed: ['sold', 'abandoned'].includes(p.status) }, s.hourlyRateEur) };
+};
+export async function repairProjects(db: Queryable) {
+  const s = await repairSettings(db);
+  return (await db.query('SELECT * FROM repair_projects ORDER BY created_at DESC, id DESC')).rows.map(r => projectFromRow(r, s));
+}
+export async function getRepairProject(db: Queryable, id: number) {
+  const r = (await db.query('SELECT * FROM repair_projects WHERE id = $1', [id])).rows[0];
+  return r ? projectFromRow(r, await repairSettings(db)) : null;
+}
+/**
+ * Turns a listing into a repair case, prefilled with its price, shipping, detected faults and the resale estimate
+ * of a matching watchlist. Idempotent: a second call returns the existing project.
+ */
+export async function createRepairProject(db: Queryable, listingId: number) {
+  const l = (await db.query('SELECT * FROM listings WHERE id = $1', [listingId])).rows[0];
+  if (!l) return null;
+  const resale = (await db.query(`SELECT w.expected_resale FROM watchlist_matches m JOIN watchlists w ON w.id = m.watchlist_id
+    WHERE m.listing_id = $1 AND w.expected_resale IS NOT NULL ORDER BY w.id LIMIT 1`, [listingId])).rows[0]?.expected_resale ?? null;
+  const ins = await db.query(`INSERT INTO repair_projects (listing_id, title, url, model, faults, purchase_price, purchase_shipping, resale_estimate)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (listing_id) DO NOTHING RETURNING id`,
+  [l.id, l.title, l.url, l.model_key, repairAssessment(l).faults, l.price_eur, l.shipping_eur, resale]);
+  if (ins.rowCount) return { id: ins.rows[0].id as number, created: true };
+  return { id: (await db.query('SELECT id FROM repair_projects WHERE listing_id = $1', [listingId])).rows[0].id as number, created: false };
+}
+const projectColumns: Record<string, string> = { title: 'title', model: 'model', faults: 'faults', status: 'status', outcome: 'outcome',
+  purchasePriceEur: 'purchase_price', purchaseShippingEur: 'purchase_shipping', purchasedAt: 'purchased_at', parts: 'parts', hoursSpent: 'hours_spent',
+  resaleEstimateEur: 'resale_estimate', salvageEstimateEur: 'salvage_estimate', soldPriceEur: 'sold_price', soldFeesEur: 'sold_fees',
+  soldShippingEur: 'sold_shipping', soldAt: 'sold_at', notes: 'notes' };
+export async function updateRepairProject(db: Queryable, id: number, patch: unknown) {
+  const entries = Object.entries(RepairProjectPatch.parse(patch));
+  const { rowCount } = await db.query(`UPDATE repair_projects SET ${entries.map(([k], i) => `${projectColumns[k]} = $${i + 2}`).join(', ')}, updated_at = now() WHERE id = $1`,
+    [id, ...entries.map(([k, v]) => k === 'parts' ? JSON.stringify(v) : v)]);
+  return rowCount ? getRepairProject(db, id) : null;
+}
+export async function deleteRepairProject(db: Queryable, id: number) {
+  return ((await db.query('DELETE FROM repair_projects WHERE id = $1', [id])).rowCount ?? 0) > 0;
+}
+/** DF-407: only finished projects count; rates appear from MIN_REPAIR_SAMPLE projects on. */
+export async function repairStats(db: Queryable) {
+  return statsOf((await repairProjects(db)).map(p => ({ faults: p.faults, outcome: p.outcome, marginEur: p.actual?.marginEur ?? null })));
 }

@@ -15,7 +15,8 @@
 | P1 Korrektheit/Domain | erledigt (Versand, Stale Matches, 49 Profile, Buckets, Auktionen, Zubehörfilter, 69 Fixtures, CI) |
 | P2 Backend/Pipeline | erledigt bis auf den Dauerlauf (→ P7) |
 | P3 Schnapper-Engine | lokal erledigt (DF-301, 303–308); DF-302 Webhooks wartet auf einen Provider mit Webhooks und `GO`; Geräte-Push-Tests in P7 |
-| P4–P6 | offen, lokal |
+| P4 Repair Lab | lokal erledigt (DF-401–407): Fehlerklassen, Konflikte/Warnungen, eigene Kostenannahmen, Worst/Base/Best-Szenarien, Reparaturprojekte mit tatsächlicher Marge, Statistik ab 5 eigenen Projekten |
+| P5–P6 | offen, lokal |
 | P7 Server | offen, ganz am Ende |
 
 ## 0. Verbindliche Leitentscheidungen

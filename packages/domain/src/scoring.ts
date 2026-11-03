@@ -1,9 +1,10 @@
 /** Deterministic, explainable MVP rules. Prices represent USER limits, not market averages. */
 import { detectModel, exclusionReason, resolveWatchTargets } from './gpu.ts';
+import { repairAssessment } from './repair.ts';
 import type { Health, ListingText, ScoredListing, WatchRules } from './types.ts';
 
 /** Bump when scoring rules change so stored assessments can be told apart. */
-export const EVALUATION_VERSION = 1;
+export const EVALUATION_VERSION = 2;
 const defectSignals = [
   /\bdefekt\b/i, /\bkaputt\b/i, /\bbastler(?:ware|gerät|karte)?\b/i, /\b(?:für|zum)\s+basteln\b/i,
   /\bkein(?:e[nrms]?)?\s+(?:bild|signal)\b/i, /\bno\s+(?:display|signal|post)\b/i,
@@ -11,22 +12,9 @@ const defectSignals = [
   /\b(?:doesn.t work|not working|for parts|ersatzteile?|nicht funktionsfähig)\b/i,
   /\b(?:wasserschaden|water damage|brandschaden|verschmort|verbrannt|pcb gebrochen|broken pcb|cracked pcb)\b/i,
   /\b(?:startet|bootet)\s+nicht\b/i, /\b(?:black screen|schwarzer bildschirm|kurzschluss|short circuit|bios defekt)\b/i,
+  /\b(?:treiberabsturz|code\s*43|blue ?screen|bsod|driver crash(?:es)?|korrosion|corrosion)\b/i,
 ];
 const uncertainSignals = [/\bungetestet\b/i, /\buntested\b/i, /\bungeprüft\b/i, /\bnicht getestet\b/i, /\bzustand unbekannt\b/i, /\bohne kühler\b/i, /\bkühlerlos\b/i];
-const repairPositive = [
-  { pattern:/\b(?:kein bild|no display|no signal|kein signal)\b/i, weight:14, reason:'Kein Bild – Fehlerbild eingegrenzt' },
-  { pattern:/\b(?:artefakte|artifacts?)\b/i, weight:10, reason:'Artefakte – Fehlerbild beschrieben' },
-  { pattern:/\b(?:lüfter drehen|fans spin|geht an|startet noch|leuchtet noch)\b/i, weight:14, reason:'Startet teilweise' },
-  { pattern:/\b(?:ungeöffnet|unverbastelt|nicht geöffnet|originalzustand)\b/i, weight:9, reason:'Kein Eingriff angegeben' },
-  { pattern:/\b(?:mit kühler|vollständig|komplett)\b/i, weight:7, reason:'Komponenten vollständig' },
-];
-const repairNegative = [
-  { pattern:/\b(?:ohne chip|gpu fehlt|ohne gpu|ohne vram|speicher fehlt)\b/i, weight:-60, reason:'Kernkomponenten fehlen' },
-  { pattern:/\b(?:pcb gebrochen|gerissen|abgebrochen|broken pcb)\b/i, weight:-35, reason:'Mechanischer Schaden' },
-  { pattern:/\b(?:wasserschaden|verschmort|verbrannt|brandschaden)\b/i, weight:-45, reason:'Wasser-/Brandschaden' },
-  { pattern:/\b(?:reflow|reballing|reparaturversuch|schon repariert)\b/i, weight:-28, reason:'Vorheriger Reparaturversuch' },
-  { pattern:/\b(?:ungetestet|untested|unbekannter fehler)\b/i, weight:-12, reason:'Fehler nicht eingegrenzt' },
-];
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo,v));
 const num = (value: unknown): number | null => Number.isFinite(Number(value)) && value !== null && value !== '' ? Number(value) : null;
 export function classify(listing: ListingText): Health {
@@ -35,15 +23,6 @@ export function classify(listing: ListingText): Health {
   if (defectSignals.some(rx=>rx.test(text))) return 'defect';
   if (uncertainSignals.some(rx=>rx.test(text))) return 'unknown';
   return 'working';
-}
-export function repairAssessment(listing: ListingText) {
-  const text = `${listing.title || ''} ${listing.description || ''}`;
-  const reasons: string[] = [];
-  let score = 45;
-  for (const {pattern,weight,reason} of [...repairPositive,...repairNegative]) {
-    if (pattern.test(text)) { score += weight; reasons.push(reason); }
-  }
-  return { score: clamp(score,0,100), confidence: reasons.length >= 3 ? 'mittel' : 'niedrig', reasons: reasons.length ? reasons : ['Nur grobe Textbewertung; kein Funktionstest'] };
 }
 export function matchesWatchlist(listing: ListingText, watchlist: { query: string }): boolean {
   const targets = resolveWatchTargets(watchlist.query);
@@ -99,7 +78,8 @@ export function scoreListing(listing: ScoredListing, watchlist: WatchRules, now 
   if (isAuction) reasons.push(`Auktion: aktuelles Gebot${listing.bidCount != null ? `, ${listing.bidCount} Gebote` : ''}${auctionMinutesLeft === null ? ', Ende unbekannt' : auctionMinutesLeft > 0 ? `, endet in ${auctionMinutesLeft < 120 ? auctionMinutesLeft + ' Min.' : Math.round(auctionMinutesLeft/60) + ' Std.'}` : ', beendet'}`);
   if (health==='unknown') reasons.push('Zustand nicht bestätigt');
   if (repair && repair.score < 30) reasons.push('Hohes Reparaturrisiko');
-  if (profitEstimate !== null) reasons.push(`Rechnerische Marge ${profitEstimate.toFixed(2)} € (Schätzung)`);
+  if (repair?.faults.some(f => f === 'WATER_DAMAGE' || f === 'BURN_DAMAGE')) reasons.push('Warnung: Wasser-/Brandschaden');
+  if (profitEstimate !== null) reasons.push(`Rechnerische Marge ${profitEstimate.toFixed(2)} € (Szenario, kein Gewinnversprechen)`);
   const recency = isFresh ? Math.max(0,35 - (ageMinutes ?? 0)*2) : 0;
   const pricePart = clamp(discountPct ?? 0, -30, 60)*0.75;
   const repairPart = isRepair ? ((repair?.score ?? 0)/100)*18 : 0;
@@ -109,7 +89,7 @@ export function scoreListing(listing: ScoredListing, watchlist: WatchRules, now 
     offerType: listing.offerType ?? 'FIXED_PRICE', auctionMinutesLeft, discountPct, ageMinutes,
     timestampBasis:publishedAt?'published':firstSeenAt?'first-seen':'unknown',
     repairScore:repair?.score ?? null, repairConfidence:repair?.confidence ?? null,
-    repairReasons:repair?.reasons ?? [], profitEstimate, alerts, reasons, priority,
+    repairReasons:repair?.reasons ?? [], repairFaults:repair?.faults ?? [], repairWarnings:repair?.warnings ?? [], repairConflicts:repair?.conflicts ?? [], profitEstimate, alerts, reasons, priority,
     requiresAttention:alerts.length>0};
 }
 

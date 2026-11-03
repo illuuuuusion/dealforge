@@ -21,7 +21,7 @@ after(async () => {
   await built.app.close(); await queues.close(); await t.close();
 });
 
-type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 const match = (pattern: string, path: string) => new RegExp(`^${pattern.replace(/:\w+/g, '[^/]+')}$`).test(path);
 /** Every response is checked against the contract of its route and status code. */
 async function call(method: Method, url: string, body?: unknown, { auth = true, action = true } = {}) {
@@ -179,4 +179,41 @@ test('DF-305/DF-307: push subscriptions, test push, receipts and delivery log', 
   assert.equal((await call('GET', '/api/v1/alerts/latency?days=0')).status, 400);
   const sw = await built.app.inject({ method: 'GET', url: '/sw.js' });
   assert.equal(sw.statusCode, 200); assert.match(sw.body, /push\/receipts/);
+});
+
+test('P4: repair project from a listing, settings, scenarios, actual margin and stats', async () => {
+  await ingestListings(db, [{ source: 'ebay', externalId: 'rep-1', title: 'RTX 3080 defekt kein Bild, Lüfter drehen', description: 'unverbastelt',
+    priceEur: 60, shippingEur: 7, url: 'https://www.ebay.de/itm/rep-1' }]);
+  const listing = (await call('GET', '/api/v1/listings?mode=repair')).body.items.find((x: { externalId: string }) => x.externalId === 'rep-1');
+  assert.deepEqual(listing.assessment.repairFaults, ['NO_DISPLAY']);
+  const created = await call('POST', '/api/v1/repair/projects', { listingId: listing.id });
+  assert.equal(created.status, 201);
+  assert.deepEqual((await call('POST', '/api/v1/repair/projects', { listingId: listing.id })).body, created.body, 'one project per listing');
+  assert.equal((await call('POST', '/api/v1/repair/projects', { listingId: 999999 })).status, 404);
+  const url = `/api/v1/repair/projects/${created.body.id}`;
+  const p = (await call('GET', url)).body.item;
+  assert.deepEqual([p.purchasePriceEur, p.purchaseShippingEur, p.model, p.faults, p.resaleEstimateEur], [60, 7, 'RTX 3080', ['NO_DISPLAY'], 330]);
+  assert.deepEqual(p.plan.scenarios.map((s: { key: string }) => s.key), ['worst', 'base', 'best']);
+  assert.equal(p.actual, null);
+
+  const settings = (await call('GET', '/api/v1/repair/settings')).body.item;
+  assert.equal(settings.costs.length, 8);
+  const rule = { fault: 'NO_DISPLAY', model: 'RTX 3080', partsMin: 40, partsMax: 40, hoursMin: 2, hoursMax: 2 };
+  assert.equal((await call('PUT', '/api/v1/repair/settings', { ...settings, costs: [...settings.costs, rule, rule] })).status, 400);
+  assert.equal((await call('PUT', '/api/v1/repair/settings', { ...settings, costs: [{ ...rule, partsMax: 1 }] })).status, 400);
+  assert.equal((await call('PUT', '/api/v1/repair/settings', { ...settings, hourlyRateEur: 10, costs: [...settings.costs, rule] })).status, 200);
+  const best = (await call('GET', url)).body.item.plan.scenarios[2];
+  assert.deepEqual([best.partsEur, best.laborEur, best.investmentEur], [40, 20, 127]);
+
+  assert.equal((await call('PATCH', url, { outcome: 'great' })).status, 400);
+  assert.equal((await call('PATCH', '/api/v1/repair/projects/999999', { notes: 'x' })).status, 404);
+  const sold = (await call('PATCH', url, { status: 'sold', outcome: 'success', purchasedAt: '2026-11-01', parts: [{ name: 'MOSFET', costEur: 12 }],
+    hoursSpent: 3, soldPriceEur: 300, soldFeesEur: 30, soldShippingEur: 8, soldAt: '2026-11-03' })).body.item;
+  assert.deepEqual(sold.actual, { costsEur: 79, revenueEur: 262, marginEur: 183, laborEur: 30, marginInclLaborEur: 153 });
+  const stats = (await call('GET', '/api/v1/repair/stats')).body;
+  assert.deepEqual(stats.items.find((i: { fault: string }) => i.fault === 'NO_DISPLAY'),
+    { fault: 'NO_DISPLAY', n: 1, success: 1, partial: 0, failed: 0, successRatePct: null, marginSamples: 1, avgMarginEur: 183 });
+  assert.equal((await call('GET', '/api/v1/repair/projects')).body.items.length, 1);
+  assert.equal((await call('DELETE', url)).status, 204);
+  assert.equal((await call('DELETE', url)).status, 404);
 });

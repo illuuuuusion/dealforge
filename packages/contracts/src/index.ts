@@ -102,6 +102,38 @@ export const PushReceipt = z.object({ deliveryId: z.number().int().positive() })
 export const Delivery = z.object({ id: z.number().int(), alertId: z.number().int().nullable(), subscriptionId: z.number().int().nullable(),
   status: z.enum(['pending', 'sent', 'failed', 'gone']), httpStatus: z.number().int().nullable(), error: z.string().nullable(),
   createdAt: isoTime, sentAt: isoTime.nullable(), shownAt: isoTime.nullable() });
+// Repair Lab (P4). Fault classes mirror FAULTS in @dealforge/domain.
+export const Fault = z.enum(['NO_DISPLAY', 'ARTIFACTS', 'DRIVER_CRASH', 'NO_POWER', 'WATER_DAMAGE', 'BURN_DAMAGE', 'PARTS_MISSING', 'UNKNOWN']);
+const hours = z.number().min(0).max(1000);
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Datum als JJJJ-MM-TT');
+export const RepairCostRule = z.object({ fault: Fault, model: z.string().trim().max(120), partsMin: money, partsMax: money, hoursMin: hours, hoursMax: hours })
+  .refine(r => r.partsMax >= r.partsMin && r.hoursMax >= r.hoursMin, 'Maximum muss mindestens dem Minimum entsprechen');
+export const RepairSettings = z.object({ hourlyRateEur: money, saleFeePct: z.number().min(0).max(100), resaleShippingEur: money, costs: z.array(RepairCostRule).max(500) })
+  .refine(s => new Set(s.costs.map(c => `${c.fault}|${c.model}`)).size === s.costs.length, 'Jede Fehlerklasse je Modell nur einmal');
+const repairFields = {
+  title: z.string().trim().min(1).max(500),
+  model: z.string().trim().max(120).nullable(),
+  faults: z.array(Fault).min(1).max(8).refine(f => new Set(f).size === f.length, 'Fehlerklasse doppelt'),
+  status: z.enum(['candidate', 'purchased', 'repairing', 'repaired', 'sold', 'abandoned']),
+  outcome: z.enum(['open', 'success', 'partial', 'failed']),
+  purchasePriceEur: money, purchaseShippingEur: money.nullable(), purchasedAt: day.nullable(),
+  parts: z.array(z.object({ name: z.string().trim().min(1).max(120), costEur: money })).max(50),
+  hoursSpent: hours, resaleEstimateEur: money.nullable(), salvageEstimateEur: money,
+  soldPriceEur: money.nullable(), soldFeesEur: money.nullable(), soldShippingEur: money.nullable(), soldAt: day.nullable(),
+  notes: z.string().max(4000),
+};
+export const RepairProjectCreate = z.object({ listingId: z.number().int().positive() });
+export const RepairProjectPatch = z.object(repairFields).partial().refine(o => Object.keys(o).length > 0, 'Mindestens ein Feld angeben');
+const RepairScenario = z.object({ key: z.enum(['worst', 'base', 'best']), label: z.string(), success: z.boolean(), partsEur: z.number(), hours: z.number(),
+  laborEur: z.number(), investmentEur: z.number(), revenueEur: z.number().nullable(), marginEur: z.number().nullable() });
+export const RepairProject = z.object({ id: z.number().int(), listingId: z.number().int().nullable(), url: z.string().nullable(), ...repairFields,
+  createdAt: isoTime, updatedAt: isoTime,
+  plan: z.object({ shippingKnown: z.boolean(), assumptions: z.array(z.string()), scenarios: z.array(RepairScenario) }),
+  actual: z.object({ costsEur: z.number(), revenueEur: z.number(), marginEur: z.number(), laborEur: z.number(), marginInclLaborEur: z.number() }).nullable() });
+export const RepairStats = z.object({ minSample: z.number().int(), items: z.array(z.object({ fault: z.union([Fault, z.literal('ALL')]), n: z.number().int(),
+  success: z.number().int(), partial: z.number().int(), failed: z.number().int(), successRatePct: z.number().nullable(),
+  marginSamples: z.number().int(), avgMarginEur: z.number().nullable() })) });
+
 export const Login = z.object({ password: z.string().max(1024) });
 export const ProviderPatch = z.object({ enabled: z.boolean() });
 
@@ -132,7 +164,7 @@ export const ErrorBody = z.object({ code: z.string(), message: z.string(), reque
 export const IdParams = z.object({ id });
 export const SourceParams = z.object({ source: z.enum(['ebay', 'kleinanzeigen']) });
 
-type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export interface RouteContract {
   method: Method; path: string; summary: string; auth?: false;
   query?: z.ZodObject; params?: z.ZodObject; body?: z.ZodType;
@@ -163,6 +195,16 @@ export const routes: RouteContract[] = [
   { method: 'POST', path: '/api/v1/push/test', summary: 'Test-Push an alle Abos senden', responses: { 200: PushResult } },
   { method: 'POST', path: '/api/v1/push/receipts', summary: 'Empfangsbestätigung des Service Workers: Benachrichtigung angezeigt', body: PushReceipt, responses: { 204: null, 400: E, 404: E } },
   { method: 'GET', path: '/api/v1/push/deliveries', summary: 'Zustellungslog: erstellt, versandt, angezeigt, fehlgeschlagen', query: AlertsQuery, responses: { 200: z.object({ items: z.array(Delivery) }), 400: E } },
+  { method: 'GET', path: '/api/v1/repair/settings', summary: 'Stundensatz, Gebühren und Teile-/Zeitannahmen je Fehlerklasse und Modell', responses: { 200: z.object({ item: RepairSettings }) } },
+  { method: 'PUT', path: '/api/v1/repair/settings', summary: 'Reparaturannahmen ersetzen', body: RepairSettings, responses: { 200: z.object({ item: RepairSettings }), 400: E } },
+  { method: 'GET', path: '/api/v1/repair/stats', summary: 'Eigene Erfolgs-/Fehlerstatistik je Fehlerklasse mit Stichprobengröße', responses: { 200: RepairStats } },
+  { method: 'GET', path: '/api/v1/repair/projects', summary: 'Reparaturprojekte mit Szenarien und tatsächlicher Marge', responses: { 200: z.object({ items: z.array(RepairProject) }) } },
+  { method: 'POST', path: '/api/v1/repair/projects', summary: 'Reparaturprojekt aus Inserat anlegen (200 = existiert bereits)', body: RepairProjectCreate,
+    responses: { 200: z.object({ id: z.number().int() }), 201: z.object({ id: z.number().int() }), 400: E, 404: E } },
+  { method: 'GET', path: '/api/v1/repair/projects/:id', summary: 'Reparaturprojekt', params: IdParams, responses: { 200: z.object({ item: RepairProject }), 404: E } },
+  { method: 'PATCH', path: '/api/v1/repair/projects/:id', summary: 'Kauf, Teile, Zeit, Ergebnis, Verkauf und Annahmen erfassen', params: IdParams, body: RepairProjectPatch,
+    responses: { 200: z.object({ item: RepairProject }), 400: E, 404: E } },
+  { method: 'DELETE', path: '/api/v1/repair/projects/:id', summary: 'Reparaturprojekt löschen (Inserat bleibt)', params: IdParams, responses: { 204: null, 404: E } },
   { method: 'GET', path: '/api/v1/providers/status', summary: 'Systemstatus: Quellen, Queues, Quoten, Worker', responses: { 200: SystemStatus } },
   { method: 'PATCH', path: '/api/v1/providers/:source', summary: 'Quelle zur Laufzeit ein-/ausschalten', params: SourceParams, body: ProviderPatch, responses: { 200: Ok, 400: E } },
   { method: 'POST', path: '/api/v1/admin/scans', summary: 'Manuellen Scan einplanen', body: ScanRequest, responses: { 202: ScanAccepted, 409: E, 429: E } },

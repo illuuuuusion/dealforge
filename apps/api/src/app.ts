@@ -187,6 +187,30 @@ export function buildApp({ config, db, queues, push }: { config: Config; db: rep
   });
   app.get('/api/v1/push/deliveries', async req => ({ items: await repo.recentDeliveries(db, C.AlertsQuery.parse(req.query).limit) }));
 
+  app.get('/api/v1/repair/settings', async () => ({ item: await repo.repairSettings(db) }));
+  app.put('/api/v1/repair/settings', async req => ({ item: await repo.saveRepairSettings(db, req.body) }));
+  app.get('/api/v1/repair/stats', async () => repo.repairStats(db));
+  app.get('/api/v1/repair/projects', async () => ({ items: await repo.repairProjects(db) }));
+  app.post('/api/v1/repair/projects', async (req, reply) => {
+    const r = await repo.createRepairProject(db, C.RepairProjectCreate.parse(req.body).listingId);
+    if (!r) throw notFound();
+    return reply.code(r.created ? 201 : 200).send({ id: r.id });
+  });
+  app.get('/api/v1/repair/projects/:id', async req => {
+    const item = await repo.getRepairProject(db, idOf(req));
+    if (!item) throw notFound();
+    return { item };
+  });
+  app.patch('/api/v1/repair/projects/:id', async req => {
+    const item = await repo.updateRepairProject(db, idOf(req), req.body);
+    if (!item) throw notFound();
+    return { item };
+  });
+  app.delete('/api/v1/repair/projects/:id', async (req, reply) => {
+    if (!await repo.deleteRepairProject(db, idOf(req))) throw notFound();
+    return reply.code(204).send();
+  });
+
   app.get('/api/v1/providers/status', async () => systemStatus(db, config, queues));
   app.patch('/api/v1/providers/:source', async req => {
     const { source } = C.SourceParams.parse(req.params), { enabled } = C.ProviderPatch.parse(req.body);
