@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { scoreListing, matchesWatchlist, classify, detectModel, repairAssessment, repairScenarios, repairActual, repairStats as statsOf, EVALUATION_VERSION, SOURCES,
-  type Source, type WatchRules, type RepairSettings, type Fault, type RepairOutcome } from '@dealforge/domain';
-import { WatchlistCreate, WatchlistPatch, ListingStatus, RepairSettings as RepairSettingsSchema, RepairProjectPatch, type WatchlistCreateInput, type WatchlistRow } from '@dealforge/contracts';
+  marketStats, weeklyHistory, MARKET_METHOD, MARKET_NOTE, MIN_WEEK_SAMPLE,
+  type Source, type WatchRules, type RepairSettings, type Fault, type RepairOutcome, type RankingContext, type RankingWeights } from '@dealforge/domain';
+import { WatchlistCreate, WatchlistPatch, ListingStatus, RepairSettings as RepairSettingsSchema, RepairProjectPatch, RankingSettings, FeedbackCreate, type WatchlistCreateInput, type WatchlistRow } from '@dealforge/contracts';
 import { tx, type Db, type Queryable } from './pool.ts';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- database rows and untrusted import payloads
@@ -174,9 +175,12 @@ const feedSql = `SELECT l.*, w.name AS watchlist_name, w.id AS watchlist_id, w.q
   FROM watchlist_matches m JOIN listings l ON l.id = m.listing_id JOIN watchlists w ON w.id = m.watchlist_id`;
 export async function listDeals(db: Queryable, { mode = 'all', source = 'all', watchlistId = null as number | null, limit = 100 } = {}) {
   const { rows } = await db.query(`${feedSql} WHERE w.active AND ($1 = 'all' OR l.source = $1) AND ($2::int IS NULL OR w.id = $2)
+      AND NOT EXISTS (SELECT 1 FROM feedback f WHERE f.listing_id = l.id)
     ORDER BY l.first_seen_at DESC LIMIT 500`, [source, watchlistId]);
+  const context = await rankingContext(db);
+  const now = new Date();
   // Scores are recomputed on read: freshness and auction end times depend on the current time.
-  return rows.map(r => ({ ...publicListing(r), assessment: scoreListing(publicListing(r), rulesFromRow(r)), watchlistName: r.watchlist_name as string, watchlistId: r.watchlist_id as number }))
+  return rows.map(r => ({ ...publicListing(r), assessment: scoreListing(publicListing(r), rulesFromRow(r), now, context(r)), watchlistName: r.watchlist_name as string, watchlistId: r.watchlist_id as number }))
     .filter((r): r is typeof r & { assessment: NonNullable<typeof r.assessment> } => r.assessment !== null)
     .filter(r => mode === 'all' || (mode === 'schnapper' && r.assessment.alerts.includes('SCHNAPPER')) || (mode === 'deal' && r.assessment.alerts.includes('DEAL'))
       || (mode === 'repair' && ['defect', 'unknown'].includes(r.assessment.health)))
@@ -187,8 +191,9 @@ export async function getListing(db: Queryable, id: number) {
   if (!listing) return null;
   const snapshots = (await db.query('SELECT observed_at, price_eur, shipping_eur FROM listing_snapshots WHERE listing_id = $1 ORDER BY observed_at, id', [id])).rows
     .map(s => ({ observedAt: s.observed_at as string, priceEur: s.price_eur as number, shippingEur: s.shipping_eur as number | null }));
+  const context = await rankingContext(db);
   const matches = (await db.query(`${feedSql} WHERE l.id = $1 ORDER BY w.id`, [id])).rows
-    .map(r => ({ watchlistId: r.watchlist_id as number, watchlistName: r.watchlist_name as string, assessment: scoreListing(publicListing(r), rulesFromRow(r)) }))
+    .map(r => ({ watchlistId: r.watchlist_id as number, watchlistName: r.watchlist_name as string, assessment: scoreListing(publicListing(r), rulesFromRow(r), new Date(), context(r)) }))
     .filter(m => m.assessment !== null);
   return { ...publicListing(listing), snapshots, matches };
 }
@@ -429,4 +434,114 @@ export async function deleteRepairProject(db: Queryable, id: number) {
 /** DF-407: only finished projects count; rates appear from MIN_REPAIR_SAMPLE projects on. */
 export async function repairStats(db: Queryable) {
   return statsOf((await repairProjects(db)).map(p => ({ faults: p.faults, outcome: p.outcome, marginEur: p.actual?.marginEur ?? null })));
+}
+
+export async function rankingSettings(db: Queryable) {
+  const r = (await db.query('SELECT * FROM ranking_settings')).rows[0];
+  const weights: RankingWeights = { freshness: r.freshness, price: r.price, repair: r.repair, market: r.market, personal: r.personal };
+  return { weights, marketMinSample: r.market_min_sample as number };
+}
+export async function saveRankingSettings(db: Queryable, input: unknown) {
+  const { weights: w, marketMinSample } = RankingSettings.parse(input);
+  await db.query('UPDATE ranking_settings SET freshness = $1, price = $2, repair = $3, market = $4, personal = $5, market_min_sample = $6',
+    [w.freshness, w.price, w.repair, w.market, w.personal, marketMinSample]);
+  return rankingSettings(db);
+}
+
+/** Window of the market value used in the feed ranking. */
+export const MARKET_WINDOW_DAYS = 30;
+/** Not seen for this long: possibly sold, removed or just no longer polled – never counted as a sale. */
+const STALE_DAYS = 3;
+const notReported = 'NOT EXISTS (SELECT 1 FROM feedback f WHERE f.listing_id = l.id)';
+const basis = (days: number, minSample: number) => ({ windowDays: days, from: new Date(Date.now() - days * 86400000).toISOString(), to: new Date().toISOString(),
+  minSample, method: MARKET_METHOD, note: MARKET_NOTE });
+const observation = (r: Row) => ({ priceEur: r.price_eur as number, offerType: r.offer_type as string, modelKey: r.model_key as string });
+
+/** DF-501..504: one market value per detected model (VRAM variants are separate keys) and condition, over all sources. */
+async function marketGroups(db: Queryable, days: number, minSample: number) {
+  const { rows } = await db.query(`SELECT l.model_key, l.health, l.offer_type, l.price_eur FROM listings l
+    WHERE l.model_key IS NOT NULL AND l.health IN ('working', 'defect', 'unknown') AND l.last_seen_at >= now() - make_interval(days => $1) AND ${notReported}`, [days]);
+  const groups = new Map<string, Row[]>();
+  for (const r of rows) groups.set(`${r.model_key}|${r.health}`, [...groups.get(`${r.model_key}|${r.health}`) ?? [], r]);
+  return new Map([...groups].map(([key, list]) => [key, marketStats(list.map(observation), minSample)]));
+}
+export async function marketOverview(db: Queryable, days = 30) {
+  const { marketMinSample } = await rankingSettings(db);
+  const items = [...await marketGroups(db, days, marketMinSample)].map(([key, st]) => {
+    const [modelKey, health] = key.split('|');
+    return { modelKey, health, observations: st.observations, n: st.n, reliable: st.reliable, p50: st.quantiles?.p50 ?? null };
+  }).sort((a, b) => b.observations - a.observations || a.modelKey.localeCompare(b.modelKey));
+  return { basis: basis(days, marketMinSample), items };
+}
+/** DF-505: distribution, weekly asking prices and price changes of one model; null if the model was never seen. */
+export async function marketDetail(db: Queryable, modelKey: string, { health = 'working', source = 'all', days = 30 } = {}) {
+  if (!(await db.query('SELECT 1 FROM listings WHERE model_key = $1 LIMIT 1', [modelKey])).rowCount) return null;
+  const { marketMinSample } = await rankingSettings(db);
+  const filter = `l.model_key = $1 AND l.health = $2 AND ($3 = 'all' OR l.source = $3) AND ${notReported}`;
+  const { rows } = await db.query(`SELECT l.offer_type, l.price_eur, l.model_key, l.first_seen_at, l.last_seen_at,
+      (SELECT s.price_eur FROM listing_snapshots s WHERE s.listing_id = l.id ORDER BY s.observed_at, s.id LIMIT 1) AS first_price
+    FROM listings l WHERE ${filter} AND (l.last_seen_at >= now() - make_interval(days => $4) OR l.first_seen_at >= now() - make_interval(days => $4))`,
+  [modelKey, health, source, days]);
+  const from = Date.now() - days * 86400000, stale = Date.now() - STALE_DAYS * 86400000;
+  const current = rows.filter(r => Date.parse(r.last_seen_at) >= from);
+  const changes = await db.query(`SELECT * FROM (SELECT s.listing_id, l.title, l.source, s.observed_at, s.price_eur,
+        lag(s.price_eur) OVER (PARTITION BY s.listing_id ORDER BY s.observed_at, s.id) AS prev
+      FROM listing_snapshots s JOIN listings l ON l.id = s.listing_id WHERE ${filter}) x
+    WHERE prev IS NOT NULL AND prev <> price_eur AND observed_at >= now() - make_interval(days => $4) ORDER BY observed_at DESC LIMIT 20`, [modelKey, health, source, days]);
+  return { modelKey, health, source, basis: basis(days, marketMinSample),
+    stats: marketStats(current.map(observation), marketMinSample),
+    availability: { active: current.filter(r => Date.parse(r.last_seen_at) >= stale).length, notSeenRecently: current.filter(r => Date.parse(r.last_seen_at) < stale).length, staleDays: STALE_DAYS },
+    history: weeklyHistory(rows.filter(r => Date.parse(r.first_seen_at) >= from).map(r => ({ ...observation(r), priceEur: r.first_price ?? r.price_eur, firstSeenAt: r.first_seen_at }))),
+    historyBasis: `Erster Angebotspreis neu entdeckter Inserate je Kalenderwoche (Mo–So, UTC); Median und Quartile ab ${MIN_WEEK_SAMPLE} Angeboten je Woche`,
+    priceChanges: changes.rows.map(c => ({ listingId: c.listing_id as number, title: c.title as string, source: c.source as Source, observedAt: c.observed_at as string,
+      fromEur: c.prev as number, toEur: c.price_eur as number })) };
+}
+
+/** One label per listing; reporting again replaces the label. False if the listing does not exist. */
+export async function saveFeedback(db: Queryable, listingId: number, input: unknown) {
+  const f = FeedbackCreate.parse(input);
+  return ((await db.query(`INSERT INTO feedback (listing_id, label, reason) SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM listings WHERE id = $1)
+    ON CONFLICT (listing_id) DO UPDATE SET label = EXCLUDED.label, reason = EXCLUDED.reason, created_at = now()`, [listingId, f.label, f.reason ?? null])).rowCount ?? 0) > 0;
+}
+const ratioOf = (r: Row) => ({ matched: r.matched as number, falseHits: r.hits as number, ratioPct: r.matched ? Math.round(r.hits / r.matched * 100) : null });
+const matchedSql = (by: string) => `SELECT ${by} count(DISTINCT m.listing_id) AS matched, count(DISTINCT f.listing_id) AS hits
+  FROM watchlist_matches m JOIN listings l ON l.id = m.listing_id JOIN watchlists w ON w.id = m.watchlist_id LEFT JOIN feedback f ON f.listing_id = m.listing_id`;
+/** false_positive_feedback_ratio: reported listings / matched listings – only what was actually reported, no quality claim. */
+export async function feedbackStats(db: Queryable) {
+  const total = (await db.query(matchedSql(''))).rows[0];
+  const byLabel = (await db.query('SELECT label, count(*) AS n FROM feedback GROUP BY label ORDER BY n DESC, label')).rows.map(r => ({ label: r.label as string, n: r.n as number }));
+  const bySource = (await db.query(`${matchedSql('l.source,')} GROUP BY l.source ORDER BY l.source`)).rows.map(r => ({ source: r.source as Source, ...ratioOf(r) }));
+  const byWatchlist = (await db.query(`${matchedSql('w.id, w.name,')} GROUP BY w.id, w.name ORDER BY w.id`)).rows.map(r => ({ watchlistId: r.id as number, name: r.name as string, ...ratioOf(r) }));
+  const st = (await db.query(`SELECT count(*) FILTER (WHERE status = 'saved') AS saved, count(*) FILTER (WHERE status = 'contacted') AS contacted,
+    count(*) FILTER (WHERE status = 'purchased') AS purchased FROM listings`)).rows[0];
+  const closed = (await repairProjects(db)).filter(p => p.actual);
+  return { ...ratioOf(total), byLabel, bySource, byWatchlist, personal: { saved: st.saved, contacted: st.contacted, purchased: st.purchased, repairClosed: closed.length,
+    repairMarginEur: closed.length ? cents(closed.reduce((sum, p) => sum + p.actual!.marginEur, 0)) : null } };
+}
+
+/**
+ * DF-506: read-time ranking inputs, each visible as its own priority part. Personal signals: models you saved, contacted,
+ * bought or repaired (+10), own closed repair projects of the model from 3 on (±10), watchlists with ≥3 reports and ≥20 % false hits (−10).
+ */
+async function rankingContext(db: Queryable) {
+  const { weights, marketMinSample } = await rankingSettings(db);
+  const market = await marketGroups(db, MARKET_WINDOW_DAYS, marketMinSample);
+  const interest = new Set((await db.query(`SELECT model_key AS m FROM listings WHERE status IN ('saved', 'contacted', 'purchased') AND model_key IS NOT NULL
+    UNION SELECT model FROM repair_projects WHERE model IS NOT NULL`)).rows.map(r => r.m as string));
+  const repair = new Map<string, number[]>();
+  for (const p of await repairProjects(db)) if (p.actual && p.model) repair.set(p.model, [...repair.get(p.model) ?? [], p.actual.marginEur]);
+  const noisy = new Map((await db.query(`${matchedSql('w.id,')} GROUP BY w.id`)).rows.map(r => [r.id as number, ratioOf(r)]));
+  return (r: Row): RankingContext => {
+    const personal: { label: string; points: number }[] = [];
+    if (r.model_key && interest.has(r.model_key)) personal.push({ label: 'Modell gemerkt/kontaktiert/gekauft', points: 10 });
+    const margins = r.health !== 'working' ? repair.get(r.model_key) : undefined;
+    if (margins && margins.length >= 3) {
+      const avg = cents(margins.reduce((a, b) => a + b, 0) / margins.length);
+      personal.push({ label: `Eigene Repair-Projekte ${avg >= 0 ? 'mit Gewinn' : 'mit Verlust'} (Ø ${avg} €, n=${margins.length})`, points: avg >= 0 ? 10 : -10 });
+    }
+    const fh = noisy.get(r.watchlist_id);
+    if (fh && fh.falseHits >= 3 && (fh.ratioPct ?? 0) >= 20) personal.push({ label: `Viele Fehltreffer in diesem Profil (${fh.ratioPct} %, n=${fh.falseHits})`, points: -10 });
+    const m = market.get(`${r.model_key}|${r.health}`);
+    return { weights, personal, market: m?.quantiles ? { medianEur: m.quantiles.p50, n: m.n, windowDays: MARKET_WINDOW_DAYS } : null };
+  };
 }

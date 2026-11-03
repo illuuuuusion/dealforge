@@ -67,6 +67,10 @@ Der Import übernimmt Suchprofile, Inserate, Treffer, Preisverlauf und Läufe mi
 - Web Push (VAPID, Service Worker): „Push-Alerts“ abonniert das Gerät, Alerts kommen auch ohne geöffneten Tab. Je Alert ein Dispatch-Job mit Retry; abgelaufene Abos (404/410) werden entfernt. Zustellungslog: versandt = vom Push-Dienst angenommen, angezeigt = Empfangsbestätigung des Service Workers. Ohne Push-API fällt die App auf Notifications bei geöffneter Seite zurück
 - Latenz je Quelle (p50/p95, 7 Tage): Inserat→Fund, Abruf→Alert, Alert→Push, Alert→angezeigt
 - Schnell-Modus je Suchprofil: eigener Abfragetakt (`FAST_POLL_INTERVAL_SECONDS`, Standard 60 s) nur für Quellen in `FAST_PROVIDERS`; Budgets gelten weiter
+- Marktwerte aus **Angebotspreisen** (nie als Verkaufspreise ausgegeben): je erkanntem Modell inkl. VRAM-Variante („RTX 3060 (8GB)“ ≠ „(12GB)“), Zustand und Quelle; eine Beobachtung je Inserat, Ausreißer außerhalb 1,5×IQR entfernt, P25/P50/P75 linear interpoliert. Auktionen (Gebot), Inserate ohne erkennbare VRAM-Variante und Verschenktes zählen nicht und werden mit Grund ausgewiesen. Unter der Mindeststichprobe (Standard 20) erscheint „keine verlässliche Schätzung“. Jeder Wert nennt Zeitfenster, Stichprobe und Berechnung; Inserate, die länger als 3 Tage nicht gesehen wurden, gelten nicht als verkauft
+- Modellansicht „Marktwerte“: Verteilung, Wochenverlauf (Median und P25–P75 ab 5 Angeboten je Woche), Preisänderungen, Filter für Zustand, Quelle und Zeitfenster
+- Ranking ohne Black Box: Priorität = 25 + Frische + Kaufgrenze + Reparatur + Angebots-Median + persönliche Signale (gemerkte/gekaufte Modelle, eigene Repair-Bilanz ab 3 Projekten, Profile mit vielen Fehltreffern), jeder Teil mit eigenem Gewicht 0–3 und auf der Karte aufgeschlüsselt
+- „Als Fehltreffer melden“ (falsches Modell, Zubehör, Zustand, Sonstiges) entfernt das Inserat aus Feed und Marktwert; Fehltreffer-Quote je Quelle und Profil, dazu Bilanz aus Favoriten, Kontakten, Käufen und tatsächlicher Repair-Marge
 - `node:test`-Tests (Domain, Provider, Datenbank, Worker, API-Contract) und explizite, optionale Live-Provider-Probes
 
 ## Datenquellen

@@ -134,6 +134,35 @@ export const RepairStats = z.object({ minSample: z.number().int(), items: z.arra
   success: z.number().int(), partial: z.number().int(), failed: z.number().int(), successRatePct: z.number().nullable(),
   marginSamples: z.number().int(), avgMarginEur: z.number().nullable() })) });
 
+// Market values from offer prices, feedback and ranking weights (P5).
+const Health = z.enum(['working', 'defect', 'unknown']);
+const days = z.coerce.number().int().min(7).max(365).default(30);
+export const MarketListQuery = z.object({ days });
+export const MarketQuery = z.object({ health: Health.default('working'), source: z.enum(['all', 'ebay', 'kleinanzeigen', 'facebook']).default('all'), days });
+export const MarketParams = z.object({ modelKey: z.string().min(1).max(120) });
+const MarketBasis = z.object({ windowDays: z.number().int(), from: isoTime, to: isoTime, minSample: z.number().int(), method: z.string(), note: z.string() });
+const quantiles = z.object({ p25: z.number(), p50: z.number(), p75: z.number(), min: z.number(), max: z.number() });
+export const MarketSummary = z.object({ basis: MarketBasis, items: z.array(z.object({ modelKey: z.string(), health: Health, observations: z.number().int(),
+  n: z.number().int(), reliable: z.boolean(), p50: z.number().nullable() })) });
+export const MarketDetail = z.object({ modelKey: z.string(), health: Health, source: z.string(), basis: MarketBasis,
+  stats: z.object({ observations: z.number().int(), n: z.number().int(), outliersRemoved: z.number().int(), minSample: z.number().int(), reliable: z.boolean(),
+    quantiles: quantiles.nullable(), excluded: z.array(z.object({ reason: z.string(), n: z.number().int() })), message: z.string().nullable() }),
+  availability: z.object({ active: z.number().int(), notSeenRecently: z.number().int(), staleDays: z.number().int() }),
+  history: z.array(z.object({ weekStart: z.string(), n: z.number().int(), p25: z.number().nullable(), p50: z.number().nullable(), p75: z.number().nullable() })),
+  historyBasis: z.string(),
+  priceChanges: z.array(z.object({ listingId: z.number().int(), title: z.string(), source: Source, observedAt: isoTime, fromEur: z.number(), toEur: z.number() })) });
+export const FeedbackCreate = z.object({ label: z.enum(['wrong_model', 'accessory', 'wrong_condition', 'other']), reason: z.string().trim().max(500).optional() });
+const ratio = z.object({ matched: z.number().int(), falseHits: z.number().int(), ratioPct: z.number().int().nullable() });
+export const FeedbackStats = ratio.extend({
+  byLabel: z.array(z.object({ label: z.string(), n: z.number().int() })),
+  bySource: z.array(ratio.extend({ source: Source })),
+  byWatchlist: z.array(ratio.extend({ watchlistId: z.number().int(), name: z.string() })),
+  personal: z.object({ saved: z.number().int(), contacted: z.number().int(), purchased: z.number().int(), repairClosed: z.number().int(), repairMarginEur: z.number().nullable() }),
+});
+const weight = z.number().min(0).max(3);
+export const RankingSettings = z.object({ weights: z.object({ freshness: weight, price: weight, repair: weight, market: weight, personal: weight }),
+  marketMinSample: z.number().int().min(5).max(1000) });
+
 export const Login = z.object({ password: z.string().max(1024) });
 export const ProviderPatch = z.object({ enabled: z.boolean() });
 
@@ -185,6 +214,14 @@ export const routes: RouteContract[] = [
   { method: 'GET', path: '/api/v1/listings', summary: 'Deal-Feed mit Filtern und Cursor', query: FeedQuery, responses: { 200: FeedResponse, 400: E } },
   { method: 'GET', path: '/api/v1/listings/:id', summary: 'Inserat mit Bewertung und Preisverlauf', params: IdParams, responses: { 200: z.object({ item: ListingDetail }), 404: E } },
   { method: 'PATCH', path: '/api/v1/listings/:id/user-state', summary: 'saved, dismissed, contacted, purchased', params: IdParams, body: UserStatePatch, responses: { 200: Ok, 400: E, 404: E } },
+  { method: 'POST', path: '/api/v1/listings/:id/feedback', summary: 'Als Fehltreffer melden (blendet das Inserat aus dem Feed und dem Marktwert aus)', params: IdParams,
+    body: FeedbackCreate, responses: { 201: Ok, 400: E, 404: E } },
+  { method: 'GET', path: '/api/v1/feedback/stats', summary: 'Fehltreffer-Quote je Quelle/Profil und persönliche Bilanz', responses: { 200: FeedbackStats } },
+  { method: 'GET', path: '/api/v1/ranking/settings', summary: 'Ranking-Gewichte und Mindeststichprobe für Marktwerte', responses: { 200: z.object({ item: RankingSettings }) } },
+  { method: 'PUT', path: '/api/v1/ranking/settings', summary: 'Ranking-Gewichte und Mindeststichprobe setzen', body: RankingSettings, responses: { 200: z.object({ item: RankingSettings }), 400: E } },
+  { method: 'GET', path: '/api/v1/market', summary: 'Angebots-Marktwerte je Modell und Zustand (Übersicht)', query: MarketListQuery, responses: { 200: MarketSummary, 400: E } },
+  { method: 'GET', path: '/api/v1/market/:modelKey', summary: 'Angebotspreis-Verteilung, Wochenverlauf und Preisänderungen eines Modells; nur mit Statistikbasis',
+    params: MarketParams, query: MarketQuery, responses: { 200: MarketDetail, 400: E, 404: E } },
   { method: 'GET', path: '/api/v1/alerts', summary: 'Ausgelöste Alerts, neueste zuerst', query: AlertsQuery, responses: { 200: z.object({ items: z.array(Alert) }), 400: E } },
   { method: 'GET', path: '/api/v1/events', summary: 'Live-Alerts als Server-Sent Events (text/event-stream): event alert, id = Alert-ID, Last-Event-ID setzt fort', responses: { 200: null } },
   { method: 'GET', path: '/api/v1/alerts/latency', summary: 'p50/p95 in Sekunden je Quelle: Inserat→Fund, Abruf→Alert, Alert→Push, Alert→angezeigt', query: LatencyQuery, responses: { 200: AlertLatency, 400: E } },

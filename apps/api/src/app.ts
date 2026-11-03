@@ -137,6 +137,21 @@ export function buildApp({ config, db, queues, push }: { config: Config; db: rep
     return ok;
   });
 
+  app.post('/api/v1/listings/:id/feedback', async (req, reply) => {
+    if (!await repo.saveFeedback(db, idOf(req), req.body)) throw notFound();
+    return reply.code(201).send(ok);
+  });
+  app.get('/api/v1/feedback/stats', async () => repo.feedbackStats(db));
+  app.get('/api/v1/ranking/settings', async () => ({ item: await repo.rankingSettings(db) }));
+  app.put('/api/v1/ranking/settings', async req => ({ item: await repo.saveRankingSettings(db, req.body) }));
+  app.get('/api/v1/market', async req => repo.marketOverview(db, C.MarketListQuery.parse(req.query).days));
+  app.get('/api/v1/market/:modelKey', async req => {
+    const { modelKey } = C.MarketParams.parse(req.params);
+    const item = await repo.marketDetail(db, modelKey, C.MarketQuery.parse(req.query));
+    if (!item) throw notFound();
+    return item;
+  });
+
   app.get('/api/v1/alerts', async req => ({ items: await repo.recentAlerts(db, C.AlertsQuery.parse(req.query).limit) }));
   // ponytail: each SSE client polls the alerts table every 2 s; LISTEN/NOTIFY once there are many clients.
   const streams = new Set<() => void>();

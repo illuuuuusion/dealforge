@@ -2,7 +2,7 @@ const $=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const eur=v=>new Intl.NumberFormat('de-DE',{style:'currency',currency:'EUR'}).format(v||0);
 const names={ebay:'eBay',kleinanzeigen:'Kleinanzeigen',facebook:'Facebook'};
-const views={all:'Übersicht',schnapper:'Schnapper',deal:'Preisalarme',repair:'Repair Lab'};
+const views={all:'Übersicht',schnapper:'Schnapper',deal:'Preisalarme',repair:'Repair Lab',market:'Marktwerte'};
 // ponytail: hand-drawn 16×16 pixel icons as ASCII art; '#' = currentColor, '+' = 35% tint.
 const ICONS={
 anvil:`
@@ -222,10 +222,11 @@ async function api(path,{method='GET',data}={}){
   return obj;
 }
 function timeAgo(when){if(!when)return 'Zeit unbekannt';const d=Date.parse(when);if(!Number.isFinite(d))return 'Zeit unbekannt';const m=Math.round((Date.now()-d)/60000);return m<1?'gerade eben':m<60?`vor ${m} Min.`:m<1440?`vor ${Math.floor(m/60)} Std.`:`vor ${Math.floor(m/1440)} Tagen`;}
-function badges(a){const badges=[];if(a.alerts.includes('SCHNAPPER'))badges.push('<span class="tag schnapper">SCHNAPPER</span>');if(a.alerts.includes('DEAL'))badges.push('<span class="tag deal">PREISALARM</span>');if(a.needsPriceCheck)badges.push('<span class="tag risk">PREIS PRÜFEN</span>');if(a.offerType==='AUCTION')badges.push('<span class="tag risk">AUKTION</span>');if(a.health==='defect')badges.push('<span class="tag repair">REPAIR</span>');if(a.health==='unknown')badges.push('<span class="tag risk">UNGEPRÜFT</span>');if(a.repairScore!==null&&a.repairScore<30)badges.push('<span class="tag risk">HOHES RISIKO</span>');return badges.join('');}
+function badges(a){const badges=[];if(a.alerts.includes('SCHNAPPER'))badges.push('<span class="tag schnapper">SCHNAPPER</span>');if(a.alerts.includes('DEAL'))badges.push('<span class="tag deal">PREISALARM</span>');if(a.needsPriceCheck)badges.push('<span class="tag risk">PREIS PRÜFEN</span>');if(a.offerType==='AUCTION')badges.push('<span class="tag risk">AUKTION</span>');if(a.health==='defect')badges.push('<span class="tag repair">REPAIR</span>');if(a.health==='unknown')badges.push('<span class="tag risk">UNGEPRÜFT</span>');if(a.market&&a.market.belowPct>=10)badges.push('<span class="tag deal">UNTER MEDIAN</span>');if(a.repairScore!==null&&a.repairScore<30)badges.push('<span class="tag risk">HOHES RISIKO</span>');return badges.join('');}
 function dealCard(item){const a=item.assessment,kind=names[item.source]||item.source;const demo=item.externalId.startsWith('demo-');const img=item.imageUrl&&/^https:\/\//.test(item.imageUrl)?`<img src="${esc(item.imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`:esc(item.watchlistName.slice(0,2).toUpperCase());const link=demo?`<span>${esc(item.title)}</span>`:`<a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a>`;
-  const msg=a.reasons.slice(0,2).map(esc).join(' · ');
-  return `<article class="deal-card"><div class="deal-thumb">${img}</div><div class="deal-main"><div class="deal-title">${link}</div><div class="deal-sub">${esc(kind)} · ${esc(a.model?`${a.model}${a.vramGb?` ${a.vramGb} GB`:''}`:item.watchlistName)} · ${esc(item.publishedAt?'':'erstmals gesehen ')}${esc(timeAgo(item.publishedAt||item.firstSeenAt))}${demo?' · Beispieldaten':''}</div><div class="badges">${badges(a)}</div><div class="deal-reasons">${msg}${a.health==='defect'?` · Reparierbarkeit: ${a.repairScore}/100 (${esc(a.repairConfidence)}) · Fehlerbild: ${a.repairFaults.map(f=>esc(faultNames[f])).join(', ')}`:''}</div>${[...(a.repairConflicts||[]),...(a.repairWarnings||[])].map(w=>`<div class="deal-warn">${esc(w)}</div>`).join('')}</div><div class="deal-right"><div class="price">${eur(a.allIn)}<small>${a.offerType==='AUCTION'?'Gebot · ':''}${a.shippingKnown?'Inkl. Versand':'zzgl. unbekanntem Versand'}</small></div><div class="score" style="--p:${Number(a.priority)||0}">Priorität ${a.priority}/100</div><div class="action-row"><button class="action ${item.status==='saved'?'saved':''}" data-action="saved" data-id="${item.id}" aria-label="Merken">${icon('floppy')}${item.status==='saved'?'Gemerkt':'Merken'}</button><button class="action" data-action="dismissed" data-id="${item.id}">${icon('close')}Ausblenden</button>${['defect','unknown'].includes(a.health)?`<button class="action" data-repair="${item.id}">${icon('wrench')}Repair Lab</button>`:''}</div></div></article>`;
+  const msg=a.reasons.slice(0,3).map(esc).join(' · ');
+  const parts=(a.priorityParts||[]).map(p=>`${esc(p.label)} ${p.points>0?'+':''}${p.points}`).join(' · ');
+  return `<article class="deal-card"><div class="deal-thumb">${img}</div><div class="deal-main"><div class="deal-title">${link}</div><div class="deal-sub">${esc(kind)} · ${esc(a.model?`${a.model}${a.vramGb?` ${a.vramGb} GB`:''}`:item.watchlistName)} · ${esc(item.publishedAt?'':'erstmals gesehen ')}${esc(timeAgo(item.publishedAt||item.firstSeenAt))}${demo?' · Beispieldaten':''}</div><div class="badges">${badges(a)}</div><div class="deal-reasons">${msg}${a.health==='defect'?` · Reparierbarkeit: ${a.repairScore}/100 (${esc(a.repairConfidence)}) · Fehlerbild: ${a.repairFaults.map(f=>esc(faultNames[f])).join(', ')}`:''}</div>${[...(a.repairConflicts||[]),...(a.repairWarnings||[])].map(w=>`<div class="deal-warn">${esc(w)}</div>`).join('')}<div class="deal-parts">Priorität ${a.priority} = 25${parts?` · ${parts}`:''}</div></div><div class="deal-right"><div class="price">${eur(a.allIn)}<small>${a.offerType==='AUCTION'?'Gebot · ':''}${a.shippingKnown?'Inkl. Versand':'zzgl. unbekanntem Versand'}</small></div><div class="score" style="--p:${Number(a.priority)||0}">Priorität ${a.priority}/100</div><div class="action-row"><button class="action ${item.status==='saved'?'saved':''}" data-action="saved" data-id="${item.id}" aria-label="Merken">${icon('floppy')}${item.status==='saved'?'Gemerkt':'Merken'}</button><button class="action" data-action="dismissed" data-id="${item.id}">${icon('close')}Ausblenden</button>${['defect','unknown'].includes(a.health)?`<button class="action" data-repair="${item.id}">${icon('wrench')}Repair Lab</button>`:''}<details class="dd more"><summary class="action">Mehr</summary><div class="dd-menu"><button type="button" data-action="contacted" data-id="${item.id}">${item.status==='contacted'?'✓ ':''}Kontaktiert</button><button type="button" data-action="purchased" data-id="${item.id}">${item.status==='purchased'?'✓ ':''}Gekauft</button><b>Als Fehltreffer melden</b>${Object.entries(feedbackLabels).map(([k,v])=>`<button type="button" data-feedback="${k}" data-id="${item.id}">${v}</button>`).join('')}</div></details></div></div></article>`;
 }
 // ponytail: "Neu" is read from the free-text condition; defect always wins via the scorer's health.
 const condition=x=>x.assessment.health==='defect'?'defect':/^\s*(neu|new|brandneu)\b/i.test(x.condition??'')?'new':'used';
@@ -239,6 +240,7 @@ function syncFilterLabels(){
   }
 }
 async function loadFeed(){
+  if(mode==='market')return;
   const f=new FormData($('#feed-filters')),source=f.get('source'),watch=f.get('watch'),offer=f.getAll('offer'),cond=f.getAll('cond');
   const p=new URLSearchParams({mode,source});if(watch)p.set('watchlistId',watch);
   const {items}=await api(`/listings?${p}`);
@@ -302,7 +304,7 @@ function connectEvents(){
   // A 401 (not logged in yet) closes the stream for good: try again later.
   es.onerror=()=>{if(es.readyState===EventSource.CLOSED)setTimeout(connectEvents,10000);};
 }
-async function refresh(){if(busy)return;busy=true;try{await loadState();await Promise.all([loadFeed(),loadAlerts(),mode==='repair'?loadRepair():null]);}catch(e){if(e.message!=='Bitte anmelden')toast(e.message);}finally{busy=false;}}
+async function refresh(){if(busy)return;busy=true;try{await loadState();await Promise.all([loadFeed(),loadAlerts(),mode==='repair'?loadRepair():null,mode==='market'?loadMarket():null]);}catch(e){if(e.message!=='Bitte anmelden')toast(e.message);}finally{busy=false;}}
 $('#login-form').addEventListener('submit',async e=>{e.preventDefault();try{await api('/auth/login',{method:'POST',data:{password:$('#password').value}});$('#login').hidden=true;$('#password').value='';await refresh();syncPush().catch(()=>{});}catch(ex){$('#login-error').textContent=ex.message;}});
 $('#scan').addEventListener('click',async()=>{if(busy)return;$('#scan').disabled=true;$('#scan span').textContent='Wird geprüft …';try{const r=await api('/admin/scans',{method:'POST',data:{source:'all'}});toast(`${r.queued.length} Abfragen eingeplant${r.deduplicated.length?`, ${r.deduplicated.length} laufen bereits`:''}`);await refresh();}catch(e){toast(e.message);}finally{$('#scan').disabled=false;$('#scan span').textContent='Jetzt prüfen';}});
 // Web Push: the service worker shows alerts even when no DealForge tab is open. Without Push API only in-page notifications.
@@ -332,13 +334,13 @@ $('#notify').addEventListener('click',async()=>{try{
   await syncPush();
 }catch(e){toast(e.message);}});
 $('#push-test').addEventListener('click',async()=>{try{const r=await api('/push/test',{method:'POST'});toast(`Test-Push: ${r.sent} versandt${r.failed?`, ${r.failed} fehlgeschlagen`:''}${r.gone?`, ${r.gone} Abo abgelaufen`:''}`);setTimeout(()=>loadAlerts().catch(()=>{}),3000);}catch(e){toast(e.message);}});
-document.querySelectorAll('.nav [data-view]').forEach(el=>el.addEventListener('click',()=>{mode=el.dataset.view;document.querySelectorAll('.nav [data-view]').forEach(x=>x.classList.toggle('active',x===el));$('#current-view').textContent=views[mode];$('#repair-lab').hidden=mode!=='repair';loadFeed().catch(e=>toast(e.message));if(mode==='repair')loadRepair().catch(e=>toast(e.message));}));
+document.querySelectorAll('.nav [data-view]').forEach(el=>el.addEventListener('click',()=>{mode=el.dataset.view;document.querySelectorAll('.nav [data-view]').forEach(x=>x.classList.toggle('active',x===el));$('#current-view').textContent=views[mode];$('#repair-lab').hidden=mode!=='repair';$('#market-view').hidden=mode!=='market';$('#feed-area').hidden=mode==='market';loadFeed().catch(e=>toast(e.message));if(mode==='repair')loadRepair().catch(e=>toast(e.message));if(mode==='market')loadMarket().catch(e=>toast(e.message));}));
 $('#focus-watchlists').addEventListener('click',()=>$('#watch-panel').scrollIntoView({behavior:'smooth'}));
 $('#feed-filters').addEventListener('change',e=>{if(e.target.type==='radio')e.target.closest('details').open=false;syncFilterLabels();loadFeed().catch(e=>toast(e.message));});
 document.addEventListener('click',e=>document.querySelectorAll('.dd[open]').forEach(d=>{if(!d.contains(e.target))d.open=false;}));
 $('#watch-form').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);try{const input={name:f.get('name'),query:f.get('query'),maxWorking:Number(f.get('maxWorking')),maxDefect:Number(f.get('maxDefect')),expectedResale:f.get('expectedResale')?Number(f.get('expectedResale')):null,repairBudget:Number(f.get('repairBudget')),sourceList:f.getAll('sourceList'),allowUnknownShipping:f.get('allowUnknownShipping')==='on',fast:f.get('fast')==='on'};await api('/watchlists',{method:'POST',data:input});e.target.reset();toast('Profil erstellt');await refresh();}catch(e){toast(e.message);}});
 $('#watchlist').addEventListener('click',async e=>{const btn=e.target.closest('[data-watch]');if(!btn)return;const id=Number(btn.dataset.id);try{if(btn.dataset.watch==='toggle')await api(`/watchlists/${id}`,{method:'PATCH',data:{active:btn.dataset.active!=='true'}});else if(confirm('Suchprofil wirklich löschen?'))await api(`/watchlists/${id}`,{method:'DELETE'});await refresh();}catch(e){toast(e.message);}});
-$('#feed').addEventListener('click',async e=>{const rep=e.target.closest('[data-repair]');if(rep){try{const {id}=await api('/repair/projects',{method:'POST',data:{listingId:Number(rep.dataset.repair)}});await openProject(id);loadRepair().catch(()=>{});}catch(ex){toast(ex.message);}return;}const btn=e.target.closest('[data-action]');if(!btn)return;try{await api(`/listings/${Number(btn.dataset.id)}/user-state`,{method:'PATCH',data:{status:btn.dataset.action}});await refresh();}catch(e){toast(e.message);}});
+$('#feed').addEventListener('click',async e=>{const rep=e.target.closest('[data-repair]');if(rep){try{const {id}=await api('/repair/projects',{method:'POST',data:{listingId:Number(rep.dataset.repair)}});await openProject(id);loadRepair().catch(()=>{});}catch(ex){toast(ex.message);}return;}const fb=e.target.closest('[data-feedback]');if(fb){try{await api(`/listings/${Number(fb.dataset.id)}/feedback`,{method:'POST',data:{label:fb.dataset.feedback}});toast('Als Fehltreffer gemeldet – aus Feed und Marktwert entfernt');await refresh();}catch(ex){toast(ex.message);}return;}const btn=e.target.closest('[data-action]');if(!btn)return;try{await api(`/listings/${Number(btn.dataset.id)}/user-state`,{method:'PATCH',data:{status:btn.dataset.action}});await refresh();}catch(e){toast(e.message);}});
 $('#import').addEventListener('click',async()=>{try{const json=JSON.parse($('#import-json').value);const rows=Array.isArray(json)?json:(Array.isArray(json.items)?json.items:null);if(!rows)throw Error('JSON-Array erwartet');const r=await api('/import/facebook',{method:'POST',data:{items:rows}});$('#import-message').textContent=`${r.normalized} Datensätze validiert, ${r.inserted} neue Inserate gespeichert`;await refresh();}catch(e){toast(e.message);}});
 $('#provider-list').addEventListener('click',async e=>{const btn=e.target.closest('[data-provider]');if(!btn)return;try{await api(`/providers/${btn.dataset.provider}`,{method:'PATCH',data:{enabled:btn.dataset.enabled!=='true'}});await refresh();}catch(e){toast(e.message);}});
 // Repair Lab: projects, own statistics and cost assumptions. Margins are scenarios; actual numbers only from closed projects.
@@ -400,5 +402,84 @@ $('#repair-settings').addEventListener('submit',async e=>{e.preventDefault();con
   const costs=[...$('#cost-rows').rows].map(r=>{const v=k=>r.querySelector(`[name="${k}"]`).value;return {fault:v('fault'),model:v('model').trim(),partsMin:Number(v('partsMin')),partsMax:Number(v('partsMax')),hoursMin:Number(v('hoursMin')),hoursMax:Number(v('hoursMax'))};});
   const {item}=await api('/repair/settings',{method:'PUT',data:{hourlyRateEur:Number(f.elements.hourlyRateEur.value),saleFeePct:Number(f.elements.saleFeePct.value),resaleShippingEur:Number(f.elements.resaleShippingEur.value),costs}});
   showSettings(item);toast('Annahmen gespeichert');await loadRepair();
+}catch(ex){toast(ex.message);}});
+// Market values (offer prices only) and ranking weights. Every number names its sample size and window.
+const feedbackLabels={wrong_model:'Falsches Modell/Variante',accessory:'Zubehör / kein Einzelgerät',wrong_condition:'Zustand falsch erkannt',other:'Sonstiger Fehltreffer'};
+const healthNames={working:'intakt',defect:'defekt',unknown:'ungetestet'};
+const day=iso=>new Date(iso).toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'2-digit'});
+let rankingShown=false;
+// Weekly median line (2px) with P25–P75 band; weeks below the minimum have no point but stay in the table and tooltip.
+function historyChart(h){
+  const pts=h.filter(w=>w.p50!==null);
+  if(!pts.length)return '<p class="helper">Noch keine Woche mit genug Angeboten für einen Median – siehe Tabelle.</p>';
+  const W=600,H=190,L=46,R=12,T=12,B=26,t=w=>Date.parse(w.weekStart);
+  const t0=t(h[0]),t1=Math.max(t(h[h.length-1]),t0+1);
+  const lo=Math.min(...pts.map(w=>w.p25)),hi=Math.max(...pts.map(w=>w.p75)),pad=Math.max(5,(hi-lo)*0.15);
+  const y0=Math.max(0,lo-pad),y1=hi+pad,x=w=>L+(h.length===1?(W-L-R)/2:(t(w)-t0)/(t1-t0)*(W-L-R)),y=v=>T+(1-(v-y0)/(y1-y0))*(H-T-B);
+  // consecutive weeks with values form one segment; a missing week breaks line and band
+  const segs=[];let cur=[];for(const w of h){if(w.p50===null){if(cur.length)segs.push(cur);cur=[];}else cur.push(w);}if(cur.length)segs.push(cur);
+  const band=segs.map(sg=>`<path d="M${sg.map(w=>`${x(w)},${y(w.p75)}`).join('L')}L${[...sg].reverse().map(w=>`${x(w)},${y(w.p25)}`).join('L')}Z" class="band"/>`).join('');
+  const line=segs.map(sg=>sg.length>1?`<path d="M${sg.map(w=>`${x(w)},${y(w.p50)}`).join('L')}" class="line"/>`:'').join('');
+  const ticks=[y0,(y0+y1)/2,y1].map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" class="grid"/><text x="${L-6}" y="${y(v)+3}" text-anchor="end">${Math.round(v)} €</text>`).join('');
+  const every=Math.ceil(h.length/6);
+  const xl=h.map((w,i)=>i%every?'':`<text x="${x(w)}" y="${H-8}" text-anchor="middle">${day(w.weekStart).slice(0,5)}</text>`).join('');
+  const colW=h.length>1?(W-L-R)/(h.length-1):W-L-R;
+  const hits=h.map((w,i)=>`<rect x="${x(w)-colW/2}" y="${T}" width="${colW}" height="${H-T-B}" data-i="${i}" class="hit"/>`).join('');
+  const dots=pts.map(w=>`<circle cx="${x(w)}" cy="${y(w.p50)}" r="4" class="dot"/>`).join('');
+  return `<div class="chart" data-history='${esc(JSON.stringify(h))}'><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Wochen-Median der Angebotspreise mit P25 bis P75">${ticks}${band}${line}${dots}${xl}<line class="cross" y1="${T}" y2="${H-B}" x1="-10" x2="-10"/>${hits}</svg><div class="tip" hidden></div></div>`;
+}
+function marketDetailHtml(d){
+  const s=d.stats,q=s.quantiles,b=d.basis;
+  const head=q?`<div class="market-head"><div class="price">${eur(q.p50)}<small>Angebots-Median · ${s.n} vergleichbare Angebote · ${b.windowDays} Tage</small></div><div class="helper">P25 ${eur(q.p25)} · P75 ${eur(q.p75)} · Spanne ${eur(q.min)}–${eur(q.max)}</div></div>`
+    :`<div class="note"><strong>Keine verlässliche Schätzung</strong><p>${esc(s.message)}</p></div>`;
+  const excluded=s.excluded.map(x=>`${esc(x.reason)}: ${x.n}`).join(' · ');
+  const weeks=d.history.map(w=>`<tr><td>${day(w.weekStart)}</td><td>${w.n}</td><td>${w.p25===null?'–':eur(w.p25)}</td><td>${w.p50===null?'–':eur(w.p50)}</td><td>${w.p75===null?'–':eur(w.p75)}</td></tr>`).join('');
+  const changes=d.priceChanges.map(c=>`<div>${esc(day(c.observedAt))} · ${esc(names[c.source])} · ${esc(c.title)}: ${eur(c.fromEur)} → <b>${eur(c.toEur)}</b> (${c.toEur<c.fromEur?'−':'+'}${eur(Math.abs(c.toEur-c.fromEur))})</div>`).join('');
+  return `${head}
+  <p class="helper"><b>Datenbasis:</b> ${esc(d.modelKey)}, ${healthNames[d.health]}, ${d.source==='all'?'alle Quellen':esc(names[d.source])} · ${day(b.from)}–${day(b.to)} (${b.windowDays} Tage) · ${s.observations} Angebote gesehen, ${s.n} verwertet, ${s.outliersRemoved} Ausreißer entfernt, Mindeststichprobe ${b.minSample}${excluded?` · Nicht vergleichbar: ${excluded}`:''}<br><b>Berechnung:</b> ${esc(b.method)}.<br><b>Verfügbarkeit:</b> ${d.availability.active} zuletzt gesehen, ${d.availability.notSeenRecently} seit über ${d.availability.staleDays} Tagen nicht mehr gesehen (Status unbekannt – nicht als Verkauf gewertet).</p>
+  <div class="note"><strong>Hinweis</strong><p>${esc(b.note)}.</p></div>
+  <h3 class="gap">Verlauf: Wochen-Median der Angebotspreise</h3><p class="helper">${esc(d.historyBasis)} · Zeitfenster ${b.windowDays} Tage · Band = P25–P75</p>${historyChart(d.history)}
+  ${weeks?`<div class="table-wrap"><table class="grid"><thead><tr><th>Woche ab</th><th>n</th><th>P25</th><th>Median</th><th>P75</th></tr></thead><tbody>${weeks}</tbody></table></div>`:''}
+  <h3 class="gap">Preisänderungen (${b.windowDays} Tage)</h3><div class="helper">${changes||'Keine Preisänderungen beobachtet.'}</div>`;
+}
+async function loadMarketDetail(){
+  const f=new FormData($('#market-filters')),model=String(f.get('model')||'').trim();
+  if(!model)return;
+  const p=new URLSearchParams({health:f.get('health'),source:f.get('source'),days:f.get('days')});
+  try{$('#mk-detail').innerHTML=marketDetailHtml(await api(`/market/${encodeURIComponent(model)}?${p}`));}
+  catch(e){$('#mk-detail').innerHTML=`<p class="helper">${esc(e.message==='Nicht gefunden'?'Zu diesem Modell gibt es noch keine Inserate.':e.message)}</p>`;}
+}
+async function loadMarket(){
+  const days=new FormData($('#market-filters')).get('days');
+  const [ov,fb,{item:rk}]=await Promise.all([api(`/market?days=${days}`),api('/feedback/stats'),api('/ranking/settings')]);
+  $('#market-models').innerHTML=[...new Set(ov.items.map(i=>i.modelKey))].map(m=>`<option value="${esc(m)}">`).join('');
+  $('#mk-basis').textContent=`${ov.basis.windowDays} Tage, alle Quellen · Median erst ab ${ov.basis.minSample} vergleichbaren Angeboten · ${ov.basis.note}`;
+  $('#mk-overview').innerHTML=ov.items.length?`<table class="grid"><thead><tr><th>Modell</th><th>Zustand</th><th>gesehen</th><th>vergleichbar</th><th>Angebots-Median</th></tr></thead><tbody>${ov.items.map(i=>`<tr><td><a href="#" data-market="${esc(i.modelKey)}" data-health="${i.health}">${esc(i.modelKey)}</a></td><td>${healthNames[i.health]}</td><td>${i.observations}</td><td>${i.n}</td><td>${i.p50===null?'zu wenig Daten':eur(i.p50)}</td></tr>`).join('')}</tbody></table>`:'<p class="helper">Noch keine Inserate mit erkanntem Modell.</p>';
+  if(!rankingShown){const f=$('#ranking-form');for(const [k,v] of Object.entries(rk.weights))f.elements[k].value=v;f.elements.marketMinSample.value=rk.marketMinSample;rankingShown=true;}
+  const pct=r=>r.ratioPct===null?'–':`${r.ratioPct} % (${r.falseHits}/${r.matched})`;
+  const p=fb.personal;
+  $('#fb-stats').innerHTML=`<div class="helper">Fehltreffer-Quote gesamt: <b>${pct(fb)}</b>${fb.byLabel.length?` · ${fb.byLabel.map(l=>`${esc(feedbackLabels[l.label]??l.label)}: ${l.n}`).join(' · ')}`:''}</div>
+    <div class="table-wrap"><table class="grid"><thead><tr><th>Suchprofil</th><th>Fehltreffer</th></tr></thead><tbody>${fb.byWatchlist.map(w=>`<tr><td>${esc(w.name)}</td><td>${pct(w)}</td></tr>`).join('')}${fb.bySource.map(x=>`<tr><td>Quelle ${esc(names[x.source])}</td><td>${pct(x)}</td></tr>`).join('')}</tbody></table></div>
+    <div class="helper">Gemerkt ${p.saved} · Kontaktiert ${p.contacted} · Gekauft ${p.purchased} · Abgeschlossene Repair-Projekte ${p.repairClosed}${p.repairMarginEur===null?'':` · tatsächliche Marge gesamt ${signed(p.repairMarginEur)}`}</div>`;
+  await loadMarketDetail();
+}
+$('#market-filters').addEventListener('change',()=>{if(new FormData($('#market-filters')).get('model'))loadMarketDetail();});
+$('#market-filters').addEventListener('submit',e=>{e.preventDefault();loadMarketDetail();});
+$('#mk-overview').addEventListener('click',e=>{const a=e.target.closest('[data-market]');if(!a)return;e.preventDefault();const f=$('#market-filters');f.elements.model.value=a.dataset.market;f.elements.health.value=a.dataset.health;loadMarketDetail().then(()=>$('#mk-detail').scrollIntoView({behavior:'smooth',block:'start'}));});
+// Hover layer: crosshair + tooltip per week, also for weeks without a median.
+$('#mk-detail').addEventListener('pointermove',e=>{
+  const hit=e.target.closest('.hit'),chart=e.target.closest('.chart');if(!chart)return;
+  const tip=chart.querySelector('.tip'),cross=chart.querySelector('.cross');
+  if(!hit){tip.hidden=true;cross.setAttribute('x1',-10);cross.setAttribute('x2',-10);return;}
+  const w=JSON.parse(chart.dataset.history)[Number(hit.dataset.i)],cx=Number(hit.getAttribute('x'))+Number(hit.getAttribute('width'))/2;
+  cross.setAttribute('x1',cx);cross.setAttribute('x2',cx);
+  tip.innerHTML=`<b>Woche ab ${day(w.weekStart)}</b><br>n = ${w.n}${w.p50===null?'<br>zu wenig Angebote für einen Median':`<br>Median ${eur(w.p50)}<br>P25–P75 ${eur(w.p25)}–${eur(w.p75)}`}`;
+  const box=chart.getBoundingClientRect();tip.hidden=false;
+  tip.style.left=`${Math.min(e.clientX-box.left+12,box.width-170)}px`;tip.style.top=`${e.clientY-box.top+12}px`;
+});
+$('#mk-detail').addEventListener('pointerleave',()=>{const t=document.querySelector('#mk-detail .tip');if(t)t.hidden=true;});
+$('#ranking-form').addEventListener('submit',async e=>{e.preventDefault();const f=e.target,n=k=>Number(f.elements[k].value);try{
+  const {item}=await api('/ranking/settings',{method:'PUT',data:{weights:{freshness:n('freshness'),price:n('price'),repair:n('repair'),market:n('market'),personal:n('personal')},marketMinSample:n('marketMinSample')}});
+  rankingShown=false;toast(`Ranking gespeichert (Mindeststichprobe ${item.marketMinSample})`);await loadMarket();
 }catch(ex){toast(ex.message);}});
 syncFilterLabels();refresh().then(()=>{connectEvents();syncPush().catch(e=>toast(e.message));});setInterval(refresh,15000);

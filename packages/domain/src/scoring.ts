@@ -1,6 +1,7 @@
 /** Deterministic, explainable MVP rules. Prices represent USER limits, not market averages. */
 import { detectModel, exclusionReason, resolveWatchTargets } from './gpu.ts';
 import { repairAssessment } from './repair.ts';
+import { comparability } from './market.ts';
 import type { Health, ListingText, ScoredListing, WatchRules } from './types.ts';
 
 /** Bump when scoring rules change so stored assessments can be told apart. */
@@ -37,7 +38,15 @@ export function matchesWatchlist(listing: ListingText, watchlist: { query: strin
   const titleTokens: string[] = String(listing.title || '').toLocaleLowerCase('de-DE').match(/[a-z0-9]+/g) || [];
   return tokens.length > 0 && tokens.every(token=>titleTokens.includes(token));
 }
-export function scoreListing(listing: ScoredListing, watchlist: WatchRules, now = new Date()) {
+export interface RankingWeights { freshness: number; price: number; repair: number; market: number; personal: number }
+export const DEFAULT_WEIGHTS: RankingWeights = { freshness: 1, price: 1, repair: 1, market: 1, personal: 1 };
+/** Optional read-time context: market reference of the listing's group and personal signals, each with its own weight. */
+export interface RankingContext {
+  weights?: RankingWeights;
+  market?: { medianEur: number; n: number; windowDays: number } | null;
+  personal?: { label: string; points: number }[];
+}
+export function scoreListing(listing: ScoredListing, watchlist: WatchRules, now = new Date(), context: RankingContext = {}) {
   const health=classify(listing);
   if (health === 'excluded') return null;
   const price = num(listing.priceEur);
@@ -79,17 +88,31 @@ export function scoreListing(listing: ScoredListing, watchlist: WatchRules, now 
   if (health==='unknown') reasons.push('Zustand nicht bestätigt');
   if (repair && repair.score < 30) reasons.push('Hohes Reparaturrisiko');
   if (repair?.faults.some(f => f === 'WATER_DAMAGE' || f === 'BURN_DAMAGE')) reasons.push('Warnung: Wasser-/Brandschaden');
+  const model = detectModel(listing);
+  // Compared with the offer median of the same model/VRAM/condition: item price only, like the median itself.
+  const market = context.market && !comparability({ priceEur: price, offerType: listing.offerType, modelKey: model?.model ?? null })
+    ? { ...context.market, belowPct: Math.round((context.market.medianEur - price) / context.market.medianEur * 100) } : null;
+  if (market) reasons.push(`${Math.abs(market.belowPct)}% ${market.belowPct >= 0 ? 'unter' : 'über'} Angebots-Median ${market.medianEur} € (${market.n} Inserate, ${market.windowDays} Tage)`);
   if (profitEstimate !== null) reasons.push(`Rechnerische Marge ${profitEstimate.toFixed(2)} € (Szenario, kein Gewinnversprechen)`);
   const recency = isFresh ? Math.max(0,35 - (ageMinutes ?? 0)*2) : 0;
   const pricePart = clamp(discountPct ?? 0, -30, 60)*0.75;
   const repairPart = isRepair ? ((repair?.score ?? 0)/100)*18 : 0;
-  const priority = Math.round(clamp(25+recency+pricePart+repairPart,0,100));
-  const model = detectModel(listing);
+  const w = context.weights ?? DEFAULT_WEIGHTS;
+  // Priority = 25 + weighted parts, clamped to 0..100; every part is returned so the ranking stays explainable.
+  const parts = [
+    { key: 'freshness', label: 'Frische', points: recency * w.freshness },
+    { key: 'price', label: 'Kaufgrenze', points: pricePart * w.price },
+    { key: 'repair', label: 'Reparatur', points: repairPart * w.repair },
+    { key: 'market', label: 'Angebots-Median', points: market ? clamp(market.belowPct, -30, 40) * 0.5 * w.market : 0 },
+    ...(context.personal ?? []).map(p => ({ key: 'personal', label: p.label, points: p.points * w.personal })),
+  ];
+  const priority = Math.round(clamp(25 + parts.reduce((s, p) => s + p.points, 0), 0, 100));
+  const priorityParts = parts.map(p => ({ ...p, points: Math.round(p.points) })).filter(p => p.points !== 0);
   return {health, model: model?.model ?? null, vramGb: model?.vramGb ?? null, allIn, knownTotalEur, shippingKnown: shipping !== null, needsPriceCheck,
     offerType: listing.offerType ?? 'FIXED_PRICE', auctionMinutesLeft, discountPct, ageMinutes,
     timestampBasis:publishedAt?'published':firstSeenAt?'first-seen':'unknown',
     repairScore:repair?.score ?? null, repairConfidence:repair?.confidence ?? null,
-    repairReasons:repair?.reasons ?? [], repairFaults:repair?.faults ?? [], repairWarnings:repair?.warnings ?? [], repairConflicts:repair?.conflicts ?? [], profitEstimate, alerts, reasons, priority,
+    repairReasons:repair?.reasons ?? [], repairFaults:repair?.faults ?? [], repairWarnings:repair?.warnings ?? [], repairConflicts:repair?.conflicts ?? [], profitEstimate, market, alerts, reasons, priority, priorityParts,
     requiresAttention:alerts.length>0};
 }
 

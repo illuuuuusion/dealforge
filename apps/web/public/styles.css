@@ -167,6 +167,30 @@ table.grid tr.best b{color:var(--lime)}
 .repair-dialog .action-row{margin-top:16px;justify-content:space-between}
 #rp-assumptions{padding-left:18px}
 #rp-assumptions li{margin:3px 0}
+/* Market values, ranking and feedback */
+#market-view[hidden],#feed-area[hidden]{display:none}
+#market-view{margin-top:0}
+#market-filters{margin-bottom:18px}
+.market-head{display:flex;flex-wrap:wrap;align-items:end;justify-content:space-between;gap:12px;margin-bottom:6px}
+.market-head .price{font-size:30px}
+h3.gap{margin:22px 0 6px}
+#ranking-form .btn{margin-top:16px}
+.deal-parts{font-family:var(--mono);font-size:10px;color:#8f7bbf;margin-top:6px}
+.dd.more summary{padding:6px 24px 6px 9px;font-size:10px}
+.dd.more summary::after{right:8px}
+.dd-menu button{display:block;width:100%;text-align:left;background:transparent;border:0;border-radius:4px;padding:8px 10px;font-size:12px;color:#d6c9f4;white-space:nowrap}
+.dd-menu button:hover{background:rgba(255,46,151,.18);color:#fff}
+.dd-menu b{display:block;padding:8px 10px 2px;font-family:var(--mono);font-size:9.5px;letter-spacing:1px;color:var(--muted);border-top:1px dashed var(--line);margin-top:4px}
+.chart{position:relative;margin:8px 0 12px}
+.chart svg{display:block;width:100%;height:auto;overflow:visible}
+.chart text{font-family:var(--mono);font-size:10px;fill:#9e8dc8}
+.chart .grid{stroke:#ffffff1f;stroke-width:1}
+.chart .band{fill:var(--cyan);opacity:.12}
+.chart .line{fill:none;stroke:var(--cyan);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.chart .dot{fill:var(--cyan);stroke:#1a0838;stroke-width:2}
+.chart .cross{stroke:#ffffff55;stroke-width:1;stroke-dasharray:3 3;pointer-events:none}
+.chart .hit{fill:transparent}
+.chart .tip{position:absolute;z-index:5;min-width:150px;pointer-events:none;background:rgba(20,6,48,.96);border:1px solid #22e4ff66;border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:11px;color:var(--fg);line-height:1.5}
 .error{color:var(--red);font-size:12px}
 footer{padding:28px 2px 4px;text-align:center;color:#8a78b8;font-family:var(--mono);font-size:10px;letter-spacing:1px}
 .login-layer{position:fixed;inset:0;background:rgba(8,0,24,.7);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);z-index:40;display:grid;place-items:center}

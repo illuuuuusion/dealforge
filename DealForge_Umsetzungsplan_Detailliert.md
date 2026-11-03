@@ -16,7 +16,8 @@
 | P2 Backend/Pipeline | erledigt bis auf den Dauerlauf (→ P7) |
 | P3 Schnapper-Engine | lokal erledigt (DF-301, 303–308); DF-302 Webhooks wartet auf einen Provider mit Webhooks und `GO`; Geräte-Push-Tests in P7 |
 | P4 Repair Lab | lokal erledigt (DF-401–407): Fehlerklassen, Konflikte/Warnungen, eigene Kostenannahmen, Worst/Base/Best-Szenarien, Reparaturprojekte mit tatsächlicher Marge, Statistik ab 5 eigenen Projekten |
-| P5–P6 | offen, lokal |
+| P5 Marktwert/Ranking | lokal erledigt (DF-501–506): Angebots-Marktwerte je Modell inkl. VRAM-Variante, Zustand und Quelle; P25/P50/P75 mit IQR-Ausreißerfilter, Mindeststichprobe 20 (einstellbar); Wochenverlauf, Preisänderungen, Fehltreffer-Feedback, einstellbare Ranking-Gewichte mit sichtbarer Aufschlüsselung |
+| P6 | offen, lokal |
 | P7 Server | offen, ganz am Ende |
 
 ## 0. Verbindliche Leitentscheidungen

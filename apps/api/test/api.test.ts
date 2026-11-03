@@ -217,3 +217,55 @@ test('P4: repair project from a listing, settings, scenarios, actual margin and 
   assert.equal((await call('DELETE', url)).status, 204);
   assert.equal((await call('DELETE', url)).status, 404);
 });
+
+test('P5: market values per model/VRAM/condition, price changes, feedback and ranking weights', async () => {
+  const row = (id: string, title: string, priceEur: number, extra = {}) => ({ source: 'ebay', externalId: `mk-${id}`, title, priceEur, shippingEur: 5,
+    url: `https://www.ebay.de/itm/mk-${id}`, ...extra });
+  await ingestListings(db, [...Array.from({ length: 20 }, (_, i) => row(`12-${i}`, 'ASUS RTX 3060 12GB Dual', 200 + i * 5)), row('fake', 'RTX 3060 12GB', 1),
+    row('8gb', 'MSI RTX 3060 8GB Ventus', 150), row('fam', 'Gigabyte RTX 3060 Gaming OC', 180), row('auc', 'RTX 3060 12GB', 50, { offerType: 'AUCTION' })]);
+  const overview = (await call('GET', '/api/v1/market')).body;
+  assert.equal(overview.basis.minSample, 20); assert.match(overview.basis.note, /keine tatsächlich erzielten Verkaufspreise/);
+  const group = (key: string) => overview.items.find((i: { modelKey: string; health: string }) => i.modelKey === key && i.health === 'working');
+  assert.deepEqual([group('RTX 3060 (12GB)').n, group('RTX 3060 (12GB)').p50], [20, 247.5], '1 € listing filtered, auction excluded');
+  assert.deepEqual([group('RTX 3060 (8GB)').n, group('RTX 3060 (8GB)').reliable], [1, false], '8 GB and 12 GB are separate');
+  assert.equal(group('RTX 3060').n, 0, 'family without VRAM is not comparable');
+
+  const url = `/api/v1/market/${encodeURIComponent('RTX 3060 (12GB)')}`;
+  const detail = (await call('GET', `${url}?days=30`)).body;
+  assert.equal(detail.stats.outliersRemoved, 1);
+  assert.deepEqual(detail.stats.excluded, [{ reason: 'Auktion: aktuelles Gebot ist kein Angebotspreis', n: 1 }]);
+  assert.equal(detail.history.length, 1); assert.equal(detail.history[0].n, 20);
+  assert.deepEqual(detail.availability, { active: 22, notSeenRecently: 0, staleDays: 3 });
+  assert.equal((await call('GET', `${url}?source=facebook`)).body.stats.reliable, false);
+  assert.match((await call('GET', `/api/v1/market/${encodeURIComponent('RTX 3060 (8GB)')}`)).body.stats.message, /Keine verlässliche Schätzung: 1 von mindestens 20/);
+  assert.equal((await call('GET', '/api/v1/market/Nope')).status, 404);
+  assert.equal((await call('GET', `${url}?days=3`)).status, 400);
+  await ingestListings(db, [row('12-0', 'ASUS RTX 3060 12GB Dual', 185)]);
+  assert.deepEqual((await call('GET', url)).body.priceChanges.map((c: { fromEur: number; toEur: number }) => [c.fromEur, c.toEur]), [[200, 185]]);
+
+  await call('POST', '/api/v1/watchlists', { name: '3060 12GB', query: 'RTX 3060 12GB', maxWorking: 260, maxDefect: 80, sourceList: ['ebay'] });
+  const feed = async () => (await call('GET', '/api/v1/listings?source=ebay&limit=200')).body.items.filter((x: { externalId: string }) => x.externalId.startsWith('mk-'));
+  const cheap = (await feed()).find((x: { externalId: string }) => x.externalId === 'mk-12-0');
+  assert.equal(cheap.assessment.market.n, 20);
+  assert.ok(cheap.assessment.reasons.some((r: string) => /unter Angebots-Median .* \(20 Inserate, 30 Tage\)/.test(r)));
+  assert.ok(cheap.assessment.priorityParts.some((p: { key: string }) => p.key === 'market'));
+
+  const fake = (await feed()).find((x: { externalId: string }) => x.externalId === 'mk-fake');
+  assert.equal((await call('POST', `/api/v1/listings/${fake.id}/feedback`, { label: 'bogus' })).status, 400);
+  assert.equal((await call('POST', '/api/v1/listings/999999/feedback', { label: 'other' })).status, 404);
+  assert.equal((await call('POST', `/api/v1/listings/${fake.id}/feedback`, { label: 'wrong_model', reason: 'Fake-Preis' })).status, 201);
+  assert.ok(!(await feed()).some((x: { id: number }) => x.id === fake.id), 'reported listing leaves the feed');
+  const fb = (await call('GET', '/api/v1/feedback/stats')).body;
+  assert.equal(fb.falseHits, 1); assert.deepEqual(fb.byLabel, [{ label: 'wrong_model', n: 1 }]);
+  assert.equal(fb.byWatchlist.find((w: { name: string }) => w.name === '3060 12GB').falseHits, 1);
+
+  const settings = (await call('GET', '/api/v1/ranking/settings')).body.item;
+  assert.deepEqual(settings, { weights: { freshness: 1, price: 1, repair: 1, market: 1, personal: 1 }, marketMinSample: 20 });
+  assert.equal((await call('PUT', '/api/v1/ranking/settings', { ...settings, weights: { ...settings.weights, market: 5 } })).status, 400);
+  assert.equal((await call('PUT', '/api/v1/ranking/settings', { ...settings, marketMinSample: 2 })).status, 400);
+  assert.equal((await call('PUT', '/api/v1/ranking/settings', { ...settings, weights: { ...settings.weights, market: 0 } })).status, 200);
+  const unweighted = (await feed()).find((x: { externalId: string }) => x.externalId === 'mk-12-0');
+  assert.ok(!unweighted.assessment.priorityParts.some((p: { key: string }) => p.key === 'market'));
+  assert.ok(unweighted.assessment.priority < cheap.assessment.priority);
+  await call('PUT', '/api/v1/ranking/settings', settings);
+});
