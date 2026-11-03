@@ -8,7 +8,7 @@ import { createTestDb, seed, reserveProviderCall, ingestListings, logSourceRun, 
 import { createQueues, redisConnection, checkIncidents, writeHeartbeat, type Queues } from '@dealforge/jobs';
 import { buildApp } from '../src/app.ts';
 
-const env = { APP_PASSWORD: 'correct-horse-battery', SECRETS_KEY: 'test-secrets-key-0123456789abcdef', APP_ORIGIN: 'http://localhost:3000', DEMO_MODE: 'false', APPROVED_PROVIDERS: 'ebay', EBAY_APP_ID: 'a', EBAY_CLIENT_SECRET: 'b',
+const env = { APP_PASSWORD: 'correct-horse-battery', SECRETS_KEY: randomBytes(24).toString('base64'), APP_ORIGIN: 'http://localhost:3000', DEMO_MODE: 'false', APPROVED_PROVIDERS: 'ebay', EBAY_APP_ID: 'a', EBAY_CLIENT_SECRET: 'b',
   QUEUE_PREFIX: `test-${randomBytes(4).toString('hex')}`, REDIS_URL: process.env.REDIS_URL, PROVIDER_DAILY_CALL_LIMIT: '50' };
 const config = loadConfig(env);
 let t: Awaited<ReturnType<typeof createTestDb>>, db: Db, queues: Queues, built: ReturnType<typeof buildApp>, cookie = '';

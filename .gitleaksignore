@@ -1,0 +1,4 @@
+# Test-only values in fb2368c (generated at runtime since then), not real secrets.
+fb2368cac06f6b0fed650c5c634f2d4675917659:apps/api/test/api.test.ts:generic-api-key:11
+fb2368cac06f6b0fed650c5c634f2d4675917659:packages/config/test/config.test.ts:generic-api-key:19
+fb2368cac06f6b0fed650c5c634f2d4675917659:.github/workflows/ci.yml:generic-api-key:49
