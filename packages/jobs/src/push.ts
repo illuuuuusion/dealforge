@@ -6,11 +6,11 @@ export interface PushTarget { endpoint: string; keys: { p256dh: string; auth: st
 /** Returns the push service's HTTP status; throws only on network errors. */
 export type PushSend = (target: PushTarget, payload: string) => Promise<number>;
 
-export async function vapidKeys(db: repo.Queryable) {
-  return JSON.parse(await repo.getOrCreateSecret(db, 'vapid', () => JSON.stringify(webpush.generateVAPIDKeys()))) as { publicKey: string; privateKey: string };
+export async function vapidKeys(db: repo.Queryable, keys: repo.SecretKeys) {
+  return JSON.parse(await repo.getOrCreateSecret(db, 'vapid', () => JSON.stringify(webpush.generateVAPIDKeys()), keys)) as { publicKey: string; privateKey: string };
 }
-export async function createPushSender(db: repo.Queryable, subject: string): Promise<PushSend> {
-  const vapidDetails = { subject, ...await vapidKeys(db) };
+export async function createPushSender(db: repo.Queryable, config: repo.SecretKeys & { vapidSubject: string }): Promise<PushSend> {
+  const vapidDetails = { subject: config.vapidSubject, ...await vapidKeys(db, config) };
   return async (target, payload) => {
     try {
       return (await webpush.sendNotification(target, payload, { vapidDetails, TTL: 3600, urgency: 'high', timeout: 10_000 })).statusCode;

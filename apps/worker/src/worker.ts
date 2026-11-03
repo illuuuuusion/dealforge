@@ -1,6 +1,6 @@
 /** Scheduler + per-provider fetch workers. Provider failures are logged per run and never block another provider. */
 import { Worker, type ConnectionOptions, type Job, type WorkerOptions } from 'bullmq';
-import type { Config } from '@dealforge/config';
+import { createRedactor, type Config } from '@dealforge/config';
 import { ingestListings, logSourceRun, reserveProviderCall, disabledProviders, type Db } from '@dealforge/db';
 import { providerReady, ProviderError, DEFAULT_RATE_LIMIT_WAIT_MS, LIVE_SOURCES, type ProviderAdapter, type LiveSource, type PlannedQuery } from '@dealforge/providers';
 import { planFor, enqueuePlan, enqueueAlerts, dispatchAlert, createPushSender, writeHeartbeat, PRIORITY, POLL_SCHEDULER_ID, FAST_POLL_SCHEDULER_ID,
@@ -34,7 +34,7 @@ export async function runFetch({ db, config, adapters, queues }: WorkerDeps, wor
   } catch (e) {
     const err = e instanceof ProviderError ? e : null;
     await logSourceRun(db, { source: platform, queryKey: key, startedAt, status: err?.code === 'QUOTA' ? 'skipped' : 'error',
-      errorCode: err?.code ?? 'INTERNAL', httpStatus: err?.httpStatus, message: (e as Error).message });
+      errorCode: err?.code ?? 'INTERNAL', httpStatus: err?.httpStatus, message: createRedactor(config)((e as Error).message) });
     // 429: pause only this provider's queue for Retry-After; the job goes back to waiting without a retry storm.
     if (err?.code === 'RATE_LIMIT') {
       await worker.rateLimit(err.retryAfterMs ?? DEFAULT_RATE_LIMIT_WAIT_MS);
@@ -62,7 +62,7 @@ export async function startWorker(deps: WorkerDeps) {
     const r = await enqueuePlan(queues, await planFor(db, config, job.data.source ?? 'all', fast), fast ? PRIORITY.fast : PRIORITY.scheduled);
     return { queued: r.queued.length, deduplicated: r.deduplicated.length };
   }, opts);
-  const send = deps.push ?? await createPushSender(db, config.vapidSubject);
+  const send = deps.push ?? await createPushSender(db, config);
   const alerts = new Worker<{ alertId: number }>('alerts', async job => {
     const r = await dispatchAlert(db, send, job.data.alertId);
     // Throwing makes BullMQ retry; already sent deliveries are skipped then.

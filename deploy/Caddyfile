@@ -1,0 +1,10 @@
+# HTTPS in front of the DealForge API (DF-602). CADDY_TLS=internal uses Caddy's local CA (browser warning locally);
+# an e-mail address instead gets a Let's Encrypt certificate for DEALFORGE_DOMAIN. HTTP redirects to HTTPS on port 443
+# (Caddy never adds another port, so with the local port 8443 open https://localhost:8443 directly).
+# Security headers (CSP, HSTS, X-Frame-Options, ...) and cookies come from the API itself, so they also hold without a proxy.
+{$DEALFORGE_DOMAIN} {
+	tls {$CADDY_TLS}
+	header -Server
+	# The API takes the client IP from X-Forwarded-For (TRUST_PROXY) for login lockout and audit log; SSE is streamed unbuffered.
+	reverse_proxy api:3000
+}

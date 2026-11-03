@@ -2,8 +2,10 @@
 import { randomUUID } from 'node:crypto';
 import { Queue, type ConnectionOptions } from 'bullmq';
 import type { Config } from '@dealforge/config';
-import { watchlists, disabledProviders, budgetExhausted, providerUsage, providerRunStats, type Db } from '@dealforge/db';
+import { watchlists, disabledProviders, budgetExhausted, providerUsage, providerRunStats, openIncident, resolveIncident, recentIncidents, type Db } from '@dealforge/db';
 import { planScan, providerReady, LIVE_SOURCES, type LiveSource, type PlannedQuery } from '@dealforge/providers';
+
+import { deliver, type PushSend } from './push.ts';
 
 export * from './push.ts';
 
@@ -96,5 +98,35 @@ export async function systemStatus(db: Db, config: Config, queues: Queues, now =
     providers.push({ source, ...p, fast: live && config.fastProviders.includes(source), state, lastRunAt: stats.lastRunAt, lastSuccessAt: stats.lastSuccessAt, lastError: stats.lastError,
       runs24h: stats.runs24h, errors24h: stats.errors24h, errorRatePct, callsToday: usage.today, callsMonth: usage.month, budgetExhausted: exhausted, queue });
   }
-  return { providers, worker: { online, lastHeartbeatAt: heartbeat }, scheduler: { enabled: config.scheduler, pollSeconds: config.pollSeconds, fastPollSeconds: config.fastPollSeconds }, limits: config.limits };
+  return { providers, worker: { online, lastHeartbeatAt: heartbeat }, scheduler: { enabled: config.scheduler, pollSeconds: config.pollSeconds, fastPollSeconds: config.fastPollSeconds },
+    limits: config.limits, incidents: await recentIncidents(db) };
+}
+
+const subjectName: Record<string, string> = { worker: 'Worker', ebay: 'eBay', kleinanzeigen: 'Kleinanzeigen' };
+/**
+ * DF-606: opens an incident and pushes once when the worker or a live provider is down; resolves it and pushes when it is back.
+ * Runs every minute in the API process, so it also notices a dead worker. Only in continuous operation (ENABLE_SCHEDULER);
+ * while the worker is offline its providers are not reported separately.
+ */
+export async function checkIncidents(db: Db, config: Config, queues: Queues, send: PushSend, now = new Date()) {
+  const changes = { opened: [] as string[], resolved: [] as string[] };
+  if (!config.scheduler) return changes;
+  const status = await systemStatus(db, config, queues, now);
+  const down = new Map<string, string>();
+  if (!status.worker.online) down.set('worker', `Kein Worker-Heartbeat${status.worker.lastHeartbeatAt ? ` seit ${status.worker.lastHeartbeatAt}` : ''} – keine Abfragen und keine Push-Zustellung`);
+  else for (const p of status.providers) {
+    if (p.state === 'down') down.set(p.source, p.lastError ? `${p.lastError.code ?? 'Fehler'}: ${p.lastError.message ?? ''}` : 'Seit drei Abfrageintervallen kein erfolgreicher Abruf');
+  }
+  for (const [subject, message] of down) {
+    if (await openIncident(db, subject, message) === null) continue;
+    changes.opened.push(subject);
+    await deliver(db, send, null, { title: `DealForge: ${subjectName[subject]} gestört`, body: message, tag: `dealforge-incident-${subject}` });
+  }
+  // Provider incidents stay open while the worker is offline: nothing was checked, nothing is resolved.
+  for (const subject of status.worker.online ? Object.keys(subjectName) : ['worker']) {
+    if (down.has(subject) || !await resolveIncident(db, subject)) continue;
+    changes.resolved.push(subject);
+    await deliver(db, send, null, { title: `DealForge: ${subjectName[subject]} wieder in Ordnung`, body: 'Störung behoben', tag: `dealforge-incident-${subject}` });
+  }
+  return changes;
 }

@@ -29,8 +29,11 @@ export async function tx<T>(db: Db, fn: (client: pg.PoolClient) => Promise<T>): 
 }
 
 const MIGRATION_LOCK = 7346001;
-/** Applies migrations/NNN_*.sql in order, each in its own transaction; safe to run from API and worker at once. */
-export async function migrate(db: Db) {
+/**
+ * Applies migrations/NNN_*.sql in order, each in its own transaction; safe to run from API and worker at once.
+ * dryRun applies all pending ones in a single transaction and rolls it back: proves they run against this database.
+ */
+export async function migrate(db: Db, { dryRun = false } = {}) {
   const client = await db.connect();
   try {
     await client.query('SELECT pg_advisory_lock($1)', [MIGRATION_LOCK]);
@@ -38,16 +41,18 @@ export async function migrate(db: Db) {
     const done = new Set((await client.query('SELECT version FROM schema_migrations')).rows.map(r => r.version));
     const dir = new URL('../migrations/', import.meta.url);
     const applied: string[] = [];
-    for (const file of fs.readdirSync(dir).filter(f => /^\d+_.*\.sql$/.test(f)).sort()) {
-      if (done.has(file)) continue;
-      await client.query('BEGIN');
-      try {
+    if (dryRun) await client.query('BEGIN');
+    try {
+      for (const file of fs.readdirSync(dir).filter(f => /^\d+_.*\.sql$/.test(f)).sort()) {
+        if (done.has(file)) continue;
+        if (!dryRun) await client.query('BEGIN');
         await client.query(fs.readFileSync(new URL(file, dir), 'utf8'));
         await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [file]);
-        await client.query('COMMIT');
+        if (!dryRun) await client.query('COMMIT');
         applied.push(file);
-      } catch (e) { await client.query('ROLLBACK'); throw e; }
-    }
+      }
+    } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; }
+    if (dryRun) await client.query('ROLLBACK');
     return applied;
   } finally {
     await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK]).catch(() => {});

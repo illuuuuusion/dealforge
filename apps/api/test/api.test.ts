@@ -4,12 +4,13 @@ import { randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { loadConfig } from '@dealforge/config';
 import { routes, ErrorBody } from '@dealforge/contracts';
-import { createTestDb, seed, reserveProviderCall, ingestListings, type Db } from '@dealforge/db';
-import { createQueues, redisConnection, type Queues } from '@dealforge/jobs';
+import { createTestDb, seed, reserveProviderCall, ingestListings, logSourceRun, savePushSubscription, type Db } from '@dealforge/db';
+import { createQueues, redisConnection, checkIncidents, writeHeartbeat, type Queues } from '@dealforge/jobs';
 import { buildApp } from '../src/app.ts';
 
-const config = loadConfig({ APP_PASSWORD: 'correct-horse-battery', APP_ORIGIN: 'http://localhost:3000', DEMO_MODE: 'false', APPROVED_PROVIDERS: 'ebay', EBAY_APP_ID: 'a', EBAY_CLIENT_SECRET: 'b',
-  QUEUE_PREFIX: `test-${randomBytes(4).toString('hex')}`, REDIS_URL: process.env.REDIS_URL, PROVIDER_DAILY_CALL_LIMIT: '50' });
+const env = { APP_PASSWORD: 'correct-horse-battery', SECRETS_KEY: 'test-secrets-key-0123456789abcdef', APP_ORIGIN: 'http://localhost:3000', DEMO_MODE: 'false', APPROVED_PROVIDERS: 'ebay', EBAY_APP_ID: 'a', EBAY_CLIENT_SECRET: 'b',
+  QUEUE_PREFIX: `test-${randomBytes(4).toString('hex')}`, REDIS_URL: process.env.REDIS_URL, PROVIDER_DAILY_CALL_LIMIT: '50' };
+const config = loadConfig(env);
 let t: Awaited<ReturnType<typeof createTestDb>>, db: Db, queues: Queues, built: ReturnType<typeof buildApp>, cookie = '';
 before(async () => {
   t = await createTestDb(); db = t.db; await seed(db);
@@ -268,4 +269,117 @@ test('P5: market values per model/VRAM/condition, price changes, feedback and ra
   assert.ok(!unweighted.assessment.priorityParts.some((p: { key: string }) => p.key === 'market'));
   assert.ok(unweighted.assessment.priority < cheap.assessment.priority);
   await call('PUT', '/api/v1/ranking/settings', settings);
+});
+
+test('DF-601: server-side sessions, logout, password change, HTTPS cookie and lockout per client behind a proxy', async () => {
+  const other = (overrides: Record<string, string>) => buildApp({ config: loadConfig({ ...env, ...overrides }), db, queues }).app;
+  assert.throws(() => other({ SECRETS_KEY: '' }), /SECRETS_KEY/);
+  assert.throws(() => other({ APP_PASSWORD: 'short' }), /APP_PASSWORD/);
+  const loginOn = async (app: ReturnType<typeof other>, password: string, headers: Record<string, string> = {}) =>
+    app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { password }, headers: { 'x-dealforge-action': '1', ...headers } });
+  const get = (app: ReturnType<typeof other>, c: string) => app.inject({ method: 'GET', url: '/api/v1/watchlists', headers: { cookie: c } }).then(r => r.statusCode);
+
+  await login();
+  const session = cookie;
+  assert.match(session, /^df_session=[\w-]{43}$/);
+  assert.equal(await get(built.app, session), 200);
+  assert.equal(await get(built.app, `${session.slice(0, -2)}xx`), 401, 'tampered token');
+  assert.equal(await get(built.app, 'df_session=1893456000000.' + 'a'.repeat(64)), 401, 'old signed cookie format');
+
+  // A new APP_PASSWORD ends every session created with the old one.
+  const changed = other({ APP_PASSWORD: 'a-completely-new-password' });
+  assert.equal(await get(changed, session), 401);
+  await changed.close();
+
+  // Logout ends this session only; all = every session.
+  await login(); const second = cookie;
+  const logout = await built.app.inject({ method: 'POST', url: '/api/v1/auth/logout', payload: {}, headers: { cookie: second, 'x-dealforge-action': '1' } });
+  assert.equal(logout.statusCode, 200); assert.match(String(logout.headers['set-cookie']), /Max-Age=0/);
+  assert.equal(await get(built.app, second), 401);
+  assert.equal(await get(built.app, session), 200);
+  assert.equal((await call('POST', '/api/v1/auth/logout', { all: true }, { auth: false })).status, 401);
+  cookie = session;
+  assert.equal((await call('POST', '/api/v1/auth/logout', { all: true })).status, 200);
+  assert.equal(await get(built.app, session), 401);
+  await login();
+
+  // HTTPS: __Host- cookie with Secure, HSTS and upgrade-insecure-requests; the plain cookie name is not accepted there.
+  const secure = other({ APP_ORIGIN: 'https://dealforge.example', TRUST_PROXY: 'true' });
+  const res = await loginOn(secure, env.APP_PASSWORD, { origin: 'https://dealforge.example' });
+  assert.equal(res.statusCode, 200);
+  const set = String(res.headers['set-cookie']);
+  assert.match(set, /^__Host-df_session=[\w-]{43}; HttpOnly; SameSite=Strict; Path=\/; Max-Age=604800; Secure$/);
+  assert.equal(await get(secure, set.split(';')[0]), 200);
+  assert.equal(await get(secure, set.split(';')[0].replace('__Host-', '')), 401);
+  assert.equal(res.headers['strict-transport-security'], 'max-age=31536000');
+  assert.match(String(res.headers['content-security-policy']), /upgrade-insecure-requests/);
+  // Behind a trusted proxy the lockout is per client (X-Forwarded-For), not one shared bucket for everyone.
+  for (let i = 0; i < 8; i++) assert.equal((await loginOn(secure, 'wrong-password-123', { 'x-forwarded-for': '203.0.113.9' })).statusCode, 401);
+  assert.equal((await loginOn(secure, env.APP_PASSWORD, { 'x-forwarded-for': '203.0.113.9' })).statusCode, 429);
+  assert.equal((await loginOn(secure, env.APP_PASSWORD, { 'x-forwarded-for': '198.51.100.7' })).statusCode, 200);
+  await secure.close();
+});
+
+test('DF-602: security headers on every response, no CORS for foreign origins', async () => {
+  for (const url of ['/', '/app.js', '/api/v1/health/live']) {
+    const r = await built.app.inject({ method: 'GET', url });
+    assert.equal(r.headers['x-frame-options'], 'DENY', url);
+    assert.equal(r.headers['x-content-type-options'], 'nosniff', url);
+    assert.equal(r.headers['referrer-policy'], 'no-referrer', url);
+    assert.match(String(r.headers['content-security-policy']), /default-src 'self'; script-src 'self';.*frame-ancestors 'none'/, url);
+    assert.equal(r.headers['strict-transport-security'], undefined, 'HSTS only over HTTPS');
+  }
+  assert.doesNotMatch((await built.app.inject({ method: 'GET', url: '/' })).body, /\son[a-z]+=/i, 'no inline event handlers (CSP script-src self)');
+  const preflight = await built.app.inject({ method: 'OPTIONS', url: '/api/v1/watchlists',
+    headers: { origin: 'https://evil.example', 'access-control-request-method': 'POST', 'access-control-request-headers': 'x-dealforge-action' } });
+  assert.ok(preflight.statusCode >= 400);
+  assert.equal(preflight.headers['access-control-allow-origin'], undefined);
+  const cross = await built.app.inject({ method: 'GET', url: '/api/v1/watchlists', headers: { cookie, origin: 'https://evil.example' } });
+  assert.equal(cross.headers['access-control-allow-origin'], undefined, 'a foreign page cannot read API responses');
+});
+
+test('DF-603: audit log records changes and rejected requests', async () => {
+  await call('POST', '/api/v1/auth/login', { password: 'wrong-password-456' }, { auth: false });
+  await call('GET', '/api/v1/watchlists', undefined, { auth: false });
+  const { status } = await call('POST', '/api/v1/watchlists', { name: 'Audit', query: 'RTX 3070', maxWorking: 300, maxDefect: 80 });
+  assert.equal(status, 201);
+  const items = (await call('GET', '/api/v1/audit?limit=200')).body.items as { method: string; path: string; status: number; ip: string }[];
+  const has = (method: string, path: string, code: number) => items.some(e => e.method === method && e.path === path && e.status === code);
+  assert.ok(has('POST', '/api/v1/watchlists', 201));
+  assert.ok(has('POST', '/api/v1/auth/login', 401));
+  assert.ok(has('GET', '/api/v1/watchlists', 401));
+  assert.ok(!items.some(e => e.method === 'GET' && e.status === 200), 'plain reads are not audited');
+  assert.equal(items[0].ip, '127.0.0.1');
+});
+
+test('DF-606: an outage opens one incident with one push; recovery resolves it and pushes again', async () => {
+  const monitored = { ...config, scheduler: true };
+  await savePushSubscription(db, { endpoint: 'https://fcm.googleapis.com/fcm/send/incident', keys: { p256dh: 'BPk', auth: 'xyz' } }, null);
+  const pushed: string[] = [];
+  const send = async (_t: unknown, payload: string) => { pushed.push(JSON.parse(payload).title); return 201; };
+  const titles = () => [...new Set(pushed)];
+
+  // No worker heartbeat: one incident for the worker, the providers are not reported on top.
+  assert.deepEqual(await checkIncidents(db, monitored, queues, send), { opened: ['worker'], resolved: [] });
+  assert.deepEqual(await checkIncidents(db, monitored, queues, send), { opened: [], resolved: [] }, 'no repeat alarm');
+  assert.deepEqual(titles(), ['DealForge: Worker gestört']);
+  await writeHeartbeat(queues);
+  assert.deepEqual((await checkIncidents(db, monitored, queues, send)).resolved, ['worker']);
+
+  // Simulated runs: eBay failing for 24 hours shows up as down in the status and raises an alarm.
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3600_000).toISOString();
+  for (const h of [24, 16, 8, 1]) await logSourceRun(db, { source: 'ebay', queryKey: 'sim', startedAt: hoursAgo(h), status: 'error', errorCode: 'HTTP', httpStatus: 503, message: 'Provider HTTP 503' });
+  const ebay = (await call('GET', '/api/v1/providers/status')).body.providers.find((p: { source: string }) => p.source === 'ebay');
+  assert.equal(ebay.errorRatePct, 100); assert.equal(ebay.lastError.code, 'HTTP');
+  assert.deepEqual((await checkIncidents(db, monitored, queues, send)).opened, ['ebay']);
+  let incidents = (await call('GET', '/api/v1/providers/status')).body.incidents;
+  assert.equal(incidents[0].subject, 'ebay'); assert.equal(incidents[0].resolvedAt, null); assert.match(incidents[0].message, /HTTP: Provider HTTP 503/);
+
+  await logSourceRun(db, { source: 'ebay', queryKey: 'sim', startedAt: new Date().toISOString(), status: 'ok' });
+  assert.deepEqual((await checkIncidents(db, monitored, queues, send)).resolved, ['ebay']);
+  incidents = (await call('GET', '/api/v1/providers/status')).body.incidents;
+  assert.ok(incidents.every((i: { resolvedAt: string | null }) => i.resolvedAt));
+  assert.deepEqual(titles(), ['DealForge: Worker gestört', 'DealForge: Worker wieder in Ordnung', 'DealForge: eBay gestört', 'DealForge: eBay wieder in Ordnung']);
+  assert.deepEqual(await checkIncidents(db, config, queues, send), { opened: [], resolved: [] }, 'no alarms without continuous operation');
+  await (await queues.plan.client).del(`${config.queuePrefix}:worker:heartbeat`);
 });

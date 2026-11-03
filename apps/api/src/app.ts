@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { randomBytes, createHmac, timingSafeEqual, scryptSync } from 'node:crypto';
+import { randomBytes, createHash, timingSafeEqual, scryptSync } from 'node:crypto';
 import Fastify, { type FastifyError, type FastifyRequest } from 'fastify';
 import { ZodError } from 'zod';
 import * as C from '@dealforge/contracts';
@@ -24,22 +24,24 @@ class HttpError extends Error {
 const notFound = () => new HttpError(404, 'NOT_FOUND', 'Nicht gefunden');
 
 export function buildApp({ config, db, queues, push }: { config: Config; db: repo.Db; queues: Queues; push?: PushSend }) {
-  if ((!config.demoMode || !['127.0.0.1', 'localhost'].includes(config.host)) && config.appPassword.length < 16) {
-    throw Error('Public deployment requires APP_PASSWORD with at least 16 characters');
+  if (!config.demoMode || !['127.0.0.1', 'localhost'].includes(config.host)) {
+    if (config.appPassword.length < 16) throw Error('Public deployment requires APP_PASSWORD with at least 16 characters');
+    if (config.secretsKey.length < 32) throw Error('Public deployment requires SECRETS_KEY with at least 32 characters (openssl rand -base64 32)');
   }
-  const secret = config.sessionSecret || randomBytes(32).toString('hex');
   const passwordHash = config.appPassword ? scryptSync(config.appPassword, 'dealforge-v1', 32) : null;
+  // Sessions are bound to the password they were created with: a new APP_PASSWORD ends every existing session.
+  const passwordTag = passwordHash ? createHash('sha256').update(passwordHash).digest('hex').slice(0, 16) : '';
+  const https = config.appOrigin.startsWith('https://');
+  // __Host- cookies are only accepted over HTTPS, for this exact host and path / (no Domain): no subdomain can set or read them.
+  const cookieName = https ? '__Host-df_session' : 'df_session';
   const loginAttempts = new Map<string, { count: number; until: number }>();
-  const sign = (payload: string) => createHmac('sha256', secret).update(payload).digest('hex');
-  function validSession(req: FastifyRequest) {
+  const sessionToken = (req: FastifyRequest) => (req.headers.cookie || '').split(';').map(x => x.trim()).find(x => x.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1) ?? null;
+  async function validSession(req: FastifyRequest) {
     if (!config.appPassword) return true;
-    const cookie = (req.headers.cookie || '').split(';').map(x => x.trim()).find(x => x.startsWith('df_session='))?.slice(11);
-    if (!cookie) return false;
-    const [expiration, tag] = cookie.split('.');
-    if (!/^\d{10,14}$/.test(expiration || '') || !/^[a-f0-9]{64}$/.test(tag || '')) return false;
-    const expected = Buffer.from(sign(expiration), 'hex'), got = Buffer.from(tag, 'hex');
-    return expected.length === got.length && timingSafeEqual(expected, got) && Date.now() < Number(expiration);
+    const token = sessionToken(req);
+    return !!token && repo.sessionValid(db, token, passwordTag);
   }
+  const cookie = (value: string, maxAge: number) => `${cookieName}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${https ? '; Secure' : ''}`;
   // localhost and 127.0.0.1 are different browser origins for the same local app: accept both.
   const loopbackTwin = (origin: string) => {
     try {
@@ -55,16 +57,32 @@ export function buildApp({ config, db, queues, push }: { config: Config; db: rep
     return origin === expected || origin === loopbackTwin(expected);
   }
 
-  const app = Fastify({ bodyLimit: 1024 * 1024, genReqId: () => randomBytes(8).toString('hex') });
+  const app = Fastify({ bodyLimit: 1024 * 1024, genReqId: () => randomBytes(8).toString('hex'), trustProxy: config.trustProxy });
   const apiRoutes: string[] = [];
   app.addHook('onRoute', r => { if (r.url.startsWith('/api/')) for (const m of [r.method].flat()) if (m !== 'HEAD') apiRoutes.push(`${m} ${r.url}`); });
   app.addHook('onRequest', async req => {
     const path = req.url.split('?')[0];
     if (!path.startsWith('/api/')) return;
     if (req.method !== 'GET' && !mutationAllowed(req)) throw new HttpError(403, 'FORBIDDEN', 'Origin/Header ungültig');
-    if (!publicPaths.has(path) && !validSession(req)) throw new HttpError(401, 'UNAUTHORIZED', 'Bitte anmelden');
+    if (!publicPaths.has(path) && !await validSession(req)) throw new HttpError(401, 'UNAUTHORIZED', 'Bitte anmelden');
   });
-  app.addHook('onSend', async (_req, reply) => { reply.header('Cache-Control', 'no-store').header('X-Content-Type-Options', 'nosniff'); });
+  // No Access-Control-* headers anywhere: the API is same-origin only, foreign origins get neither CORS nor mutations.
+  const csp = ["default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' https: data:", "connect-src 'self'",
+    "object-src 'none'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'", ...(https ? ['upgrade-insecure-requests'] : [])].join('; ');
+  app.addHook('onSend', async (_req, reply) => {
+    reply.header('Cache-Control', 'no-store').header('X-Content-Type-Options', 'nosniff').header('Content-Security-Policy', csp)
+      .header('Referrer-Policy', 'no-referrer').header('X-Frame-Options', 'DENY').header('Cross-Origin-Opener-Policy', 'same-origin')
+      .header('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+    if (https) reply.header('Strict-Transport-Security', 'max-age=31536000');
+  });
+  // Audit (DF-603): every changing request and every rejected one; service worker receipts are routine and skipped.
+  app.addHook('onResponse', async (req, reply) => {
+    const path = req.url.split('?')[0];
+    if (!path.startsWith('/api/') || path === '/api/v1/push/receipts') return;
+    if (req.method === 'GET' && ![401, 403, 429].includes(reply.statusCode)) return;
+    await repo.audit(db, { method: req.method, path, status: reply.statusCode, ip: req.ip, userAgent: req.headers['user-agent'] ?? null, requestId: req.id })
+      .catch(e => console.error('[audit]', (e as Error).message));
+  });
   app.setErrorHandler((err: FastifyError | ZodError | HttpError, req, reply) => {
     if (err instanceof ZodError) {
       return reply.code(400).send({ code: 'VALIDATION', message: err.issues.map(i => `${i.path.join('.') || 'body'}: ${i.message}`).join('; '), requestId: req.id });
@@ -77,8 +95,7 @@ export function buildApp({ config, db, queues, push }: { config: Config; db: rep
   app.setNotFoundHandler((req, reply) => reply.code(404).send({ code: 'NOT_FOUND', message: 'Endpunkt nicht vorhanden', requestId: req.id }));
 
   for (const [route, file, type] of staticFiles) {
-    app.get(route, async (_req, reply) => reply.type(type).header('Referrer-Policy', 'no-referrer').header('X-Frame-Options', 'DENY')
-      .send(fs.readFileSync(new URL(file, webRoot))));
+    app.get(route, async (_req, reply) => reply.type(type).send(fs.readFileSync(new URL(file, webRoot))));
   }
 
   const ok = { ok: true as const };
@@ -100,10 +117,17 @@ export function buildApp({ config, db, queues, push }: { config: Config; db: rep
       throw new HttpError(401, 'WRONG_PASSWORD', 'Falsches Passwort');
     }
     loginAttempts.delete(ip);
-    const expiry = String(Date.now() + 7 * 24 * 3600000);
-    reply.header('Set-Cookie', `df_session=${expiry}.${sign(expiry)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800${config.appOrigin.startsWith('https://') ? '; Secure' : ''}`);
+    const token = await repo.createSession(db, passwordTag, req.headers['user-agent'] ?? null);
+    reply.header('Set-Cookie', cookie(token, repo.SESSION_DAYS * 86400));
     return { ok: true };
   });
+  app.post('/api/v1/auth/logout', async (req, reply) => {
+    const { all } = C.Logout.parse(req.body ?? {});
+    await repo.deleteSessions(db, all ? null : sessionToken(req) ?? '');
+    reply.header('Set-Cookie', cookie('', 0));
+    return ok;
+  });
+  app.get('/api/v1/audit', async req => ({ items: await repo.auditLog(db, C.AlertsQuery.parse(req.query).limit) }));
   app.get('/api/v1/openapi.json', async () => C.openApiDocument());
   app.get('/api/v1/state', async () => ({ stats: await repo.listStats(db), models, demoMode: config.demoMode }));
 
@@ -185,8 +209,8 @@ export function buildApp({ config, db, queues, push }: { config: Config; db: rep
   });
 
   let sender: Promise<PushSend> | null = null;
-  const send: PushSend = async (target, payload) => (await (sender ??= push ? Promise.resolve(push) : createPushSender(db, config.vapidSubject)))(target, payload);
-  app.get('/api/v1/push/public-key', async () => ({ publicKey: (await vapidKeys(db)).publicKey }));
+  const send: PushSend = async (target, payload) => (await (sender ??= push ? Promise.resolve(push) : createPushSender(db, config)))(target, payload);
+  app.get('/api/v1/push/public-key', async () => ({ publicKey: (await vapidKeys(db, config)).publicKey }));
   app.get('/api/v1/push-subscriptions', async () => ({ items: (await repo.pushSubscriptions(db)).map(s => ({ id: s.id, host: new URL(s.endpoint).hostname,
     userAgent: s.userAgent, createdAt: s.createdAt, lastSuccessAt: s.lastSuccessAt })) }));
   app.post('/api/v1/push-subscriptions', async (req, reply) =>

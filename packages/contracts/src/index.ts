@@ -164,6 +164,11 @@ export const RankingSettings = z.object({ weights: z.object({ freshness: weight,
   marketMinSample: z.number().int().min(5).max(1000) });
 
 export const Login = z.object({ password: z.string().max(1024) });
+// all = end every session (e.g. after losing a device), not only this one.
+export const Logout = z.object({ all: z.boolean().default(false) });
+export const AuditEntry = z.object({ id: z.number().int(), at: isoTime, method: z.string(), path: z.string(), status: z.number().int(),
+  ip: z.string().nullable(), userAgent: z.string().nullable(), requestId: z.string().nullable() });
+export const Incident = z.object({ id: z.number().int(), subject: z.string(), message: z.string(), openedAt: isoTime, resolvedAt: isoTime.nullable() });
 export const ProviderPatch = z.object({ enabled: z.boolean() });
 
 const count = z.number().int().min(0);
@@ -181,6 +186,8 @@ export const SystemStatus = z.object({
   worker: z.object({ online: z.boolean(), lastHeartbeatAt: isoTime.nullable() }),
   scheduler: z.object({ enabled: z.boolean(), pollSeconds: z.number().int(), fastPollSeconds: z.number().int() }),
   limits: z.object({ daily: count, monthly: count, perQueryDaily: count }),
+  // Open incidents first, then the most recently resolved (DF-606).
+  incidents: z.array(Incident),
 });
 export const DashboardState = z.object({
   stats: z.object({ total: count, saved: count, repairCandidates: count, alertsToday: count }),
@@ -205,6 +212,8 @@ export const routes: RouteContract[] = [
   { method: 'GET', path: '/api/v1/health/live', summary: 'Prozess erreichbar', auth: false, responses: { 200: Ok } },
   { method: 'GET', path: '/api/v1/health/ready', summary: 'DB, Redis und Worker erreichbar', auth: false, responses: { 200: Ready, 503: Ready } },
   { method: 'POST', path: '/api/v1/auth/login', summary: 'Session-Cookie per App-Passwort', auth: false, body: Login, responses: { 200: Ok, 401: E, 429: E } },
+  { method: 'POST', path: '/api/v1/auth/logout', summary: 'Session beenden (all: alle Sessions)', body: Logout, responses: { 200: Ok, 400: E } },
+  { method: 'GET', path: '/api/v1/audit', summary: 'Audit-Log: ändernde und abgewiesene Anfragen, neueste zuerst (90 Tage)', query: AlertsQuery, responses: { 200: z.object({ items: z.array(AuditEntry) }), 400: E } },
   { method: 'GET', path: '/api/v1/openapi.json', summary: 'Dieses OpenAPI-Dokument', responses: { 200: z.looseObject({ openapi: z.string() }) } },
   { method: 'GET', path: '/api/v1/state', summary: 'Dashboard-Kennzahlen und Modellliste', responses: { 200: DashboardState } },
   { method: 'GET', path: '/api/v1/watchlists', summary: 'Eigene Suchprofile', responses: { 200: z.object({ items: z.array(Watchlist) }) } },

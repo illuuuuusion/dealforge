@@ -1,5 +1,7 @@
-# Local stack: API, worker, PostgreSQL, Redis. Ports bind to 127.0.0.1 only.
+# Local stack: API, worker, PostgreSQL, Redis. Ports bind to 127.0.0.1 only; the host ports can be moved
+# (API_PORT, POSTGRES_PORT, REDIS_PORT), e.g. for a second project like scripts/restore-test.sh.
 # Postgres/Redis ports are published for `pnpm test` and dev processes on the host.
+# HTTPS: `docker compose --profile proxy up -d` adds Caddy in front of the API (deploy/Caddyfile).
 x-app-env: &app-env
   DATABASE_URL: "postgres://dealforge:${POSTGRES_PASSWORD:-dealforge}@postgres:5432/dealforge"
   REDIS_URL: "redis://redis:6379"
@@ -18,8 +20,13 @@ x-app-env: &app-env
   KLAZ_API_KEY: "${KLAZ_API_KEY:-}"
   KLAZ_LOCATION_ID: "${KLAZ_LOCATION_ID:-}"
   KLAZ_RADIUS_KM: "${KLAZ_RADIUS_KM:-}"
+  # Encrypts app secrets in the database (DF-603); API and worker need the same key.
+  SECRETS_KEY: "${SECRETS_KEY:-}"
+  SECRETS_KEY_PREVIOUS: "${SECRETS_KEY_PREVIOUS:-}"
 x-app: &app
   build: .
+  # One tag for API and worker, shared with other compose projects (restore test, deploy).
+  image: "${DEALFORGE_IMAGE:-dealforge:local}"
   restart: unless-stopped
   depends_on:
     postgres: { condition: service_healthy }
@@ -29,15 +36,16 @@ services:
   api:
     <<: *app
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${API_PORT:-3000}:3000"
     environment:
       <<: *app-env
       HOST: "0.0.0.0"
       PORT: "3000"
       # The API refuses to start without an APP_PASSWORD of at least 16 characters.
       APP_PASSWORD: "${APP_PASSWORD:-}"
-      SESSION_SECRET: "${SESSION_SECRET:-}"
       APP_ORIGIN: "${APP_ORIGIN:-http://localhost:3000}"
+      # Requests arrive through Caddy or Docker's port forwarding, both from private addresses: take the client IP from them.
+      TRUST_PROXY: "${TRUST_PROXY:-loopback,uniquelocal}"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/v1/health/live"]
       interval: 15s
@@ -57,7 +65,7 @@ services:
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-dealforge}"
       POSTGRES_DB: dealforge
     ports:
-      - "127.0.0.1:55432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -71,7 +79,7 @@ services:
     # AOF persistence: queued jobs and the poll scheduler survive a Redis restart.
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "127.0.0.1:56379:6379"
+      - "127.0.0.1:${REDIS_PORT:-56379}:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -79,7 +87,27 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+  # HTTPS reverse proxy (DF-602). Local: internal CA, https://localhost:8443. Server: DEALFORGE_DOMAIN=deals.example.org,
+  # CADDY_TLS=you@example.org (ACME), PROXY_BIND=0.0.0.0, PROXY_HTTPS_PORT=443, PROXY_HTTP_PORT=80, APP_ORIGIN=https://deals.example.org.
+  caddy:
+    image: caddy:2-alpine
+    profiles: [proxy]
+    restart: unless-stopped
+    depends_on:
+      api: { condition: service_healthy }
+    environment:
+      DEALFORGE_DOMAIN: "${DEALFORGE_DOMAIN:-localhost}"
+      CADDY_TLS: "${CADDY_TLS:-internal}"
+    ports:
+      - "${PROXY_BIND:-127.0.0.1}:${PROXY_HTTPS_PORT:-8443}:443"
+      - "${PROXY_BIND:-127.0.0.1}:${PROXY_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
 volumes:
+  caddy_data:
+  caddy_config:
   pgdata:
   redisdata:
   dealforge_db:

@@ -32,6 +32,23 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build
       - run: pnpm test
+      # Migrations: rolled-back dry run, real run, then nothing may be pending.
+      - run: pnpm db migrate --dry-run
+      - run: pnpm db migrate
+      - name: Nothing pending after migrate
+        run: |
+          pnpm db migrate --dry-run | grep -F 'Pending: []'
+      - run: docker build -t dealforge:ci .
+      - name: Image smoke test against the CI services
+        env:
+          DATABASE_URL: postgres://dealforge:dealforge@127.0.0.1:55432/dealforge
+          REDIS_URL: redis://127.0.0.1:56379
+        run: |
+          docker run --rm --network host -e DATABASE_URL dealforge:ci node packages/db/dist/cli.js migrate --dry-run
+          docker run -d --name api --network host -e DATABASE_URL -e REDIS_URL -e PORT=3999 -e DEMO_MODE=false \
+            -e APP_PASSWORD=ci-smoke-test-password -e SECRETS_KEY=ci-smoke-test-secrets-key-0123456789 dealforge:ci
+          for _ in $(seq 30); do curl -fsS http://127.0.0.1:3999/api/v1/health/live && exit 0; sleep 1; done
+          docker logs api; exit 1
   secrets:
     runs-on: ubuntu-latest
     steps:
@@ -41,3 +58,25 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # Inactive until a server exists: repository variable DEPLOY_ENABLED=true plus secrets DEPLOY_HOST (user@host),
+  # DEPLOY_SSH_KEY and DEPLOY_KNOWN_HOSTS. Runs only after green tests and secret scan; scripts/deploy.sh does the rest.
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    needs: [test, secrets]
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency: { group: deploy, cancel-in-progress: false }
+    steps:
+      - name: Deploy over SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/dealforge' }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # shellcheck disable=SC2029 # path and revision are meant to expand here, on the runner
+          ssh "$DEPLOY_HOST" "cd '$DEPLOY_PATH' && scripts/deploy.sh '$DEPLOY_SHA'"

@@ -7,12 +7,12 @@ Eigenständige, responsive WebApp als Nachfolger des Discord-Bots [`illuuuuusion
 ## Starten (Docker Compose)
 
 ```bash
-cp .env.example .env     # APP_PASSWORD (≥16 Zeichen) und SESSION_SECRET setzen
+cp .env.example .env     # APP_PASSWORD (≥16 Zeichen) und SECRETS_KEY (openssl rand -base64 32) setzen
 docker compose up --build -d
 # Öffnen: http://127.0.0.1:3000
 ```
 
-Der Stack besteht aus `api` (Port `127.0.0.1:3000`), `worker`, `postgres` (`127.0.0.1:55432`) und `redis` (`127.0.0.1:56379`, AOF-persistiert). Die API wendet beim Start die versionierten Migrationen an und legt bei leerer Datenbank vier Startprofile an. Ohne `APP_PASSWORD` mit mindestens 16 Zeichen startet die API außerhalb des Demo-Modus auf localhost nicht. Für Zugriff über das Internet einen HTTPS-Reverse-Proxy und HTTPS-`APP_ORIGIN` konfigurieren. **Keinen ungeschützten öffentlichen Server betreiben.**
+Der Stack besteht aus `api` (Port `127.0.0.1:3000`), `worker`, `postgres` (`127.0.0.1:55432`) und `redis` (`127.0.0.1:56379`, AOF-persistiert). Die API wendet beim Start die versionierten Migrationen an und legt bei leerer Datenbank vier Startprofile an. Ohne `APP_PASSWORD` (mindestens 16 Zeichen) und `SECRETS_KEY` (mindestens 32 Zeichen) startet die API nur im Demo-Modus auf localhost. Für HTTPS das Proxy-Profil nutzen (siehe [Betrieb](#betrieb)). **Keinen ungeschützten öffentlichen Server betreiben.**
 
 Mit `DEMO_MODE=true` zeigt die App fünf **synthetische** Beispielinserate; beim Wechsel auf `DEMO_MODE=false` werden sie wieder gelöscht.
 
@@ -46,7 +46,7 @@ docker compose run --rm api node packages/db/dist/cli.js import-sqlite /legacy/d
 pnpm db import-sqlite ./data/dealforge.sqlite --replace
 ```
 
-Der Import übernimmt Suchprofile, Inserate, Treffer, Preisverlauf und Läufe mit ihren IDs und vergleicht danach Zeilenanzahlen, ID-Summen, Preissummen und Inhalts-Hashes; bei Abweichung endet er mit Exit-Code 1. `--replace` leert die Zieldatenbank vorher (nötig, weil die API Startprofile anlegt). Vorher ein Backup ziehen (`docker compose exec postgres pg_dump -U dealforge dealforge > backup.sql`); Migrationen haben keine Down-Skripte, Rollback = Backup einspielen.
+Der Import übernimmt Suchprofile, Inserate, Treffer, Preisverlauf und Läufe mit ihren IDs und vergleicht danach Zeilenanzahlen, ID-Summen, Preissummen und Inhalts-Hashes; bei Abweichung endet er mit Exit-Code 1. `--replace` leert die Zieldatenbank vorher (nötig, weil die API Startprofile anlegt). Vorher ein Backup ziehen (`scripts/backup.sh`); Migrationen haben keine Down-Skripte, Rollback = Backup einspielen (`scripts/restore.sh`).
 
 ## Enthalten
 
@@ -134,9 +134,27 @@ Die App startet in diesem Modus nur mit `APP_PASSWORD`. Ein Scan kann über die 
 
 Nur `https://facebook.com` und die gebräuchlichen Subdomains werden angenommen. Keine Verkäufer-Kontaktdaten speichern. Beispieldaten und echte Inserate sind in der UI unterscheidbar.
 
+## Betrieb
+
+Alles hier ist lokal erprobt. Server-spezifische Schritte (Domain, Cron, Deploy-Secrets) folgen in P7.
+
+**HTTPS-Proxy.** `docker compose --profile proxy up -d` startet zusätzlich Caddy ([`deploy/Caddyfile`](deploy/Caddyfile)). Lokal erhält `https://localhost:8443` ein Zertifikat der internen Caddy-CA (Browserwarnung); dafür `APP_ORIGIN=https://localhost:8443` setzen. Auf dem Server: `DEALFORGE_DOMAIN`, `CADDY_TLS=<E-Mail>` (Let's Encrypt), `PROXY_BIND=0.0.0.0`, `PROXY_HTTPS_PORT=443`, `PROXY_HTTP_PORT=80`, `APP_ORIGIN=https://<domain>`. HTTP leitet auf HTTPS (Port 443) um. SSE läuft ungepuffert durch.
+
+**Sitzungen und Header.** Sessions liegen serverseitig in PostgreSQL. Das Cookie enthält nur ein Zufallstoken, gespeichert wird dessen SHA-256. Sie überstehen Neustarts. „Abmelden“ beendet die eigene Sitzung, „Alle Sitzungen beenden“ alle (`POST /api/v1/auth/logout`). Ein neues `APP_PASSWORD` beendet automatisch jede alte Sitzung. Über HTTPS heißt das Cookie `__Host-df_session` (Secure, HttpOnly, SameSite=Strict), dazu kommen HSTS und `upgrade-insecure-requests`. Jede Antwort trägt CSP (`script-src 'self'`, keine Inline-Skripte), `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy` und COOP. CORS gibt es nicht: fremde Origins bekommen weder lesenden Zugriff noch Mutationen. Hinter dem Proxy nimmt die API die Client-IP aus `X-Forwarded-For` (`TRUST_PROXY`, in Compose `loopback,uniquelocal`). Dadurch gilt die Login-Sperre (8 Fehlversuche → 60 s) je Client.
+
+**Secrets.** Provider-Schlüssel und Passwörter kommen aus der Umgebung oder aus Dateien (`APP_PASSWORD_FILE=/run/secrets/…`, funktioniert für jede Variable). Sie stehen nie in der Datenbank und damit nie in Backups. In der Datenbank gespeicherte Secrets (VAPID-Schlüssel) sind mit `SECRETS_KEY` per AES-256-GCM verschlüsselt. **Rotation:** neuen Schlüssel als `SECRETS_KEY` setzen, den alten als `SECRETS_KEY_PREVIOUS`, API neu starten (sie verschlüsselt beim Start um), danach `SECRETS_KEY_PREVIOUS` entfernen und Worker neu starten. Provider-Schlüssel rotieren: Wert in `.env` ändern, `docker compose up -d`. Alle Log-Zeilen und gespeicherten Provider-Fehler laufen durch einen Redactor: konfigurierte Secret-Werte, `Bearer`/`Basic`, `access_token`, `klaz_key`, `api_key`, Passwörter in URLs. Das Audit-Log (`GET /api/v1/audit`, in der UI unter „Sicherheit“) zeigt jede ändernde und jede abgewiesene Anfrage (401/403/429) mit IP.
+
+**Backup und Restore.** `scripts/backup.sh` schreibt einen geprüften `pg_dump` nach `backups/daily/` (7 Tage), sonntags zusätzlich nach `backups/weekly/` (30 Tage). Redis braucht kein Backup: Jobs und Scheduler legt der Worker neu an. `scripts/restore.sh <dump>` ersetzt alle Daten des Stacks (mit Rückfrage). `scripts/restore-test.sh [dump]` spielt ein Backup in ein leeres, separates Compose-Projekt ein, vergleicht die Daten Zeile für Zeile mit dem Dump, startet API und Worker darauf, prüft `/health/ready` und räumt wieder auf. Für den Restore wird der `SECRETS_KEY` gebraucht, der beim Backup aktiv war: Schlüssel getrennt von den Backups aufbewahren. Server-Cron: `15 3 * * * cd /opt/dealforge && scripts/backup.sh >> backups/backup.log 2>&1`.
+
+**Deploy und Rollback.** `scripts/deploy.sh <revision>` läuft auf dem Server: Checkout → Backup → Image-Build → Migrations-Dry-Run (alle offenen Migrationen in einer zurückgerollten Transaktion) → Start mit Proxy → Readiness-Check. Schlägt ein Schritt fehl, bricht das Release ab. Rollback: `scripts/deploy.sh <vorherige revision>`. Muss eine Migration zurück, das vom Deploy erstellte Backup einspielen. Der CI-Job `deploy` ruft das Skript per SSH auf, sobald Tests und Secret-Scan grün sind. Er ist inaktiv, bis die Repository-Variable `DEPLOY_ENABLED=true` und die Secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS` gesetzt sind (P7).
+
+**Störungen.** Im Dauerbetrieb (`ENABLE_SCHEDULER=true`) prüft die API jede Minute den Worker-Heartbeat und jede Live-Quelle. Ein Ausfall (Worker offline, eine Quelle `down`: drei Fehlläufe in Folge oder drei Intervalle ohne Erfolg) öffnet genau einen Incident und schickt einen Push. Die Behebung schickt einen zweiten. Offene Incidents stehen oben unter „Quellen & Integration“. Die Latenzanzeige markiert verfehlte Ziele (Abruf→Alert p95 ≤5 s, Alert→Push p95 ≤10 s). Lokal gemessen: Worker gestoppt → Incident nach 88 s.
+
+**Aufbewahrung.** Stündlich löscht die API abgelaufene Sessions sowie Audit-Log, Provider-Läufe, Zustellungslog, Abfragezähler und behobene Incidents nach 90 Tagen. Inserate, die 400 Tage nicht mehr gesehen wurden, löscht sie ebenfalls, außer sie sind gemerkt, kontaktiert, gekauft oder in einem Reparaturprojekt. Begründung und Betriebsformen: [ADR 002](docs/decisions/002-privacy-retention.md).
+
 ## Was fehlt noch?
 
-Server-Betrieb (24/7, HTTPS, Backups – siehe Randbedingung im Umsetzungsplan), eingehende Provider-Webhooks und Push-Tests auf Mobilgeräten (erst mit Server, P7), echte marktplatzübergreifende Angebots-Dubletten, Marktpreise und Preistrends, Auth per OIDC/Passkey, React/Vite-Oberfläche (die bestehende UI wurde nur auf `/api/v1` umgehängt), API-Anbieter-Abnahme. Für den Beta-Betrieb ist außerdem ein Security Review notwendig.
+Server-Betrieb (24/7, Domain/TLS, Backup-Cron, Deploy-Secrets – P7), eingehende Provider-Webhooks und Push-Tests auf Mobilgeräten (erst mit Server, P7), echte marktplatzübergreifende Angebots-Dubletten, Marktpreise und Preistrends, Auth per OIDC/Passkey (optional, bewusst nicht umgesetzt), Mehrbenutzerbetrieb (Voraussetzung für Zugang Dritter, ADR 002), React/Vite-Oberfläche (die bestehende UI wurde nur auf `/api/v1` umgehängt), API-Anbieter-Abnahme. Für den Beta-Betrieb ist außerdem ein Security Review notwendig.
 
 Die Roadmap und Abnahmekriterien stehen in [`DealForge_Umsetzungsplan_Detailliert.md`](DealForge_Umsetzungsplan_Detailliert.md).
 
@@ -151,14 +169,14 @@ pnpm dev:api                          # API aus den TS-Quellen (Node-Type-Stripp
 pnpm dev:worker
 ```
 
-Jede Testdatei bekommt ein eigenes Postgres-Schema und ein eigenes Redis-Prefix; Tests laufen also neben einem laufenden Stack. CI (`.github/workflows/ci.yml`) startet Postgres und Redis als Services, führt Lint, Typecheck, Build und Tests aus und scannt die Historie mit gitleaks nach Secrets. Regressionsfälle für Modell-/Zubehörerkennung stehen in `fixtures/gpu-listings.json`, neue Fehltreffer dort ergänzen.
+Jede Testdatei bekommt ein eigenes Postgres-Schema und ein eigenes Redis-Prefix; Tests laufen also neben einem laufenden Stack. CI (`.github/workflows/ci.yml`) startet Postgres und Redis als Services und führt Lint, Typecheck, Build und Tests aus. Danach folgen Migrations-Dry-Run, Migration und erneuter Dry-Run (es darf nichts offen sein), Docker-Image-Build und ein Smoke-Test des Images (Dry-Run und `/health/live`). Außerdem scannt CI die Historie mit gitleaks nach Secrets. Ohne Node 22 lokal laufen die Checks auch im Container: `docker run --rm --network host -v "$PWD":/app -w /app node:22-alpine sh -c 'corepack enable && pnpm test'`. Regressionsfälle für Modell-/Zubehörerkennung stehen in `fixtures/gpu-listings.json`, neue Fehltreffer dort ergänzen.
 
 ## API-Oberfläche
 
 Vollständig als OpenAPI 3.1 unter `GET /api/v1/openapi.json` (aus den Zod-Contracts erzeugt; ein Test stellt sicher, dass jede Route dokumentiert ist). Fehlerantworten haben immer die Form `{ code, message, requestId }`.
 
 - `GET /api/v1/health/live`, `GET /api/v1/health/ready` (DB, Redis, Worker-Heartbeat)
-- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/login`, `POST /api/v1/auth/logout` (`{"all":true}` beendet alle Sessions), `GET /api/v1/audit?limit=…`
 - `GET /api/v1/state`, `GET /api/v1/providers/status`, `PATCH /api/v1/providers/:source` (`{"enabled":false}`)
 - `GET|POST /api/v1/watchlists`, `PATCH|DELETE /api/v1/watchlists/:id`
 - `GET /api/v1/listings?mode=all|schnapper|deal|repair&source=…&watchlistId=…&limit=…&cursor=…`, `GET /api/v1/listings/:id`

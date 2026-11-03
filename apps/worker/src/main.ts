@@ -1,10 +1,11 @@
-import { loadConfig } from '@dealforge/config';
+import { loadConfig, createRedactor, redactConsole } from '@dealforge/config';
 import { createPool, migrate } from '@dealforge/db';
 import { createQueues, redisConnection } from '@dealforge/jobs';
 import { createAdapters } from '@dealforge/providers';
 import { startWorker } from './worker.ts';
 
 const config = loadConfig();
+redactConsole(createRedactor(config));
 const db = createPool(config.databaseUrl);
 await migrate(db);
 const connection = redisConnection(config.redisUrl);

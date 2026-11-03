@@ -4,8 +4,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { randomBytes } from 'node:crypto';
 import { createTestDb, seed, migrate, ingestListings, listDeals, watchlists, createWatchlist, updateWatchlist, deleteWatchlist,
-  getListing, reserveProviderCall, budgetExhausted, importSqlite, recentAlerts, alertsAfter, latestAlertId, type Db } from '../src/index.ts';
+  getListing, reserveProviderCall, budgetExhausted, importSqlite, recentAlerts, alertsAfter, latestAlertId, setListingStatus, createRepairProject,
+  createPool, DEFAULT_DATABASE_URL, getOrCreateSecret, resealSecrets, openSecret, purgeExpired, audit, type Db } from '../src/index.ts';
 
 let t: Awaited<ReturnType<typeof createTestDb>>, db: Db;
 before(async () => { t = await createTestDb(); db = t.db; await seed(db); });
@@ -129,6 +131,53 @@ test('DF-304/T-11/T-12: one first alert per kind, one PRICE_DROP per price level
 test('Migrations are versioned and idempotent', async () => {
   assert.deepEqual(await migrate(db), []);
   assert.equal(await count("SELECT count(*) AS n FROM schema_migrations WHERE version = '001_init.sql'"), 1);
+});
+
+test('DF-605: a migration dry run applies all pending migrations and rolls them back', async () => {
+  const schema = `dry_${randomBytes(4).toString('hex')}`;
+  await db.query(`CREATE SCHEMA ${schema}`);
+  const empty = createPool(process.env.DATABASE_URL || DEFAULT_DATABASE_URL, { schema });
+  try {
+    const pending = await migrate(empty, { dryRun: true });
+    assert.ok(pending.includes('001_init.sql') && pending.includes('006_ops.sql'));
+    assert.equal((await empty.query("SELECT to_regclass('watchlists') AS t")).rows[0].t, null, 'nothing committed');
+    assert.deepEqual(await migrate(db, { dryRun: true }), [], 'up-to-date database: nothing pending');
+  } finally { await empty.end(); await db.query(`DROP SCHEMA ${schema} CASCADE`); }
+});
+
+test('DF-603: app secrets are encrypted at rest and re-encrypted on key rotation', async () => {
+  const oldKeys = { secretsKey: 'old-key-0123456789abcdef0123456789', secretsKeyPrevious: '' };
+  const stored = async () => (await db.query("SELECT value FROM app_secrets WHERE name = 'rot'")).rows[0].value as string;
+  assert.equal(await getOrCreateSecret(db, 'rot', () => 'private-vapid', oldKeys), 'private-vapid');
+  assert.match(await stored(), /^enc:v1:[0-9a-f]{8}:/); assert.doesNotMatch(await stored(), /private-vapid/);
+  assert.equal(await getOrCreateSecret(db, 'rot', () => 'other', oldKeys), 'private-vapid', 'created once');
+  const newKeys = { secretsKey: 'new-key-abcdef0123456789abcdef0123', secretsKeyPrevious: oldKeys.secretsKey };
+  assert.ok(await resealSecrets(db, newKeys) >= 1);
+  assert.equal(await resealSecrets(db, newKeys), 0, 'already under the new key');
+  assert.equal(openSecret({ ...newKeys, secretsKeyPrevious: '' }, await stored()), 'private-vapid', 'old key no longer needed');
+  const rotated = await stored();
+  assert.throws(() => openSecret(oldKeys, rotated), /SECRETS_KEY/, 'the old key alone cannot read it');
+  await db.query("INSERT INTO app_secrets (name, value) VALUES ('plain', 'legacy') ON CONFLICT DO NOTHING");
+  await resealSecrets(db, newKeys);
+  assert.match((await db.query("SELECT value FROM app_secrets WHERE name = 'plain'")).rows[0].value, /^enc:v1:/, 'plain rows from before SECRETS_KEY get encrypted');
+});
+
+test('DF-607: retention purges old logs and long-unseen listings, keeps what the user works with', async () => {
+  const old = (days: number) => new Date(Date.now() - days * 86400_000).toISOString();
+  const row = (externalId: string) => ({ source: 'ebay', externalId, title: 'RTX 3080 defekt', priceEur: 50, shippingEur: 5, url: `https://www.ebay.de/itm/${externalId}` });
+  await ingestListings(db, ['ret-old', 'ret-saved', 'ret-repair', 'ret-recent'].map(row));
+  await db.query("UPDATE listings SET last_seen_at = $1 WHERE external_id IN ('ret-old', 'ret-saved', 'ret-repair')", [old(401)]);
+  const id = async (externalId: string) => (await db.query('SELECT id FROM listings WHERE external_id = $1', [externalId])).rows[0]?.id as number | undefined;
+  await setListingStatus(db, (await id('ret-saved'))!, 'saved');
+  await createRepairProject(db, (await id('ret-repair'))!);
+  await audit(db, { method: 'POST', path: '/x', status: 200, ip: null, userAgent: null, requestId: null });
+  await db.query("INSERT INTO audit_log (at, method, path, status) VALUES ($1, 'POST', '/old', 200)", [old(91)]);
+  await db.query("INSERT INTO sessions (token_hash, password_tag, expires_at) VALUES ('expired', 't', $1)", [old(1)]);
+  const purged = await purgeExpired(db);
+  assert.equal(purged.listings, 1); assert.equal(purged.auditLog, 1); assert.equal(purged.sessions, 1);
+  assert.equal(await id('ret-old'), undefined);
+  for (const kept of ['ret-saved', 'ret-repair', 'ret-recent']) assert.ok(await id(kept), kept);
+  assert.equal(await count("SELECT count(*) AS n FROM audit_log WHERE path = '/x'"), 1);
 });
 
 const legacySchema = `CREATE TABLE watchlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, query TEXT NOT NULL, max_working REAL NOT NULL, max_defect REAL NOT NULL,

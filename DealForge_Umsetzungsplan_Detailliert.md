@@ -17,7 +17,7 @@
 | P3 Schnapper-Engine | lokal erledigt (DF-301, 303–308); DF-302 Webhooks wartet auf einen Provider mit Webhooks und `GO`; Geräte-Push-Tests in P7 |
 | P4 Repair Lab | lokal erledigt (DF-401–407): Fehlerklassen, Konflikte/Warnungen, eigene Kostenannahmen, Worst/Base/Best-Szenarien, Reparaturprojekte mit tatsächlicher Marge, Statistik ab 5 eigenen Projekten |
 | P5 Marktwert/Ranking | lokal erledigt (DF-501–506): Angebots-Marktwerte je Modell inkl. VRAM-Variante, Zustand und Quelle; P25/P50/P75 mit IQR-Ausreißerfilter, Mindeststichprobe 20 (einstellbar); Wochenverlauf, Preisänderungen, Fehltreffer-Feedback, einstellbare Ranking-Gewichte mit sichtbarer Aufschlüsselung |
-| P6 | offen, lokal |
+| P6 Härtung | lokal erledigt (DF-601–607): serverseitige Sessions mit Logout/„alle beenden“ und Passwortbindung, `__Host-`-Cookie, CSP/HSTS/Security-Header, kein CORS, Login-Sperre je Client hinter dem Proxy; Caddy-Profil mit internem Zertifikat geprüft; `SECRETS_KEY`-Verschlüsselung mit Rotation, `*_FILE`-Secrets, Log-Redaction, Audit-Log; Backup/Restore inkl. automatischem Restore-Test; CI mit Migrations-Dry-Run, Image-Build und -Smoke-Test, Deploy-Job inaktiv; Incidents mit Push bei Ausfall/Behebung; Retention und ADR 002 |
 | P7 Server | offen, ganz am Ende |
 
 ## 0. Verbindliche Leitentscheidungen
@@ -735,7 +735,7 @@ So wird das wichtigste Alleinstellungsmerkmal – rechtzeitig passende, auch def
 ### Persönliche Testinstanz
 
 - Demo-Modus aktiv, Scheduler aus, nur `127.0.0.1`.
-- `APP_PASSWORD`, `SESSION_SECRET`, `APP_ORIGIN` bei abweichendem Betrieb setzen.
+- `APP_PASSWORD`, `SECRETS_KEY`, `APP_ORIGIN` bei abweichendem Betrieb setzen.
 - Lokale SQLite-Datei und Testdaten nicht als produktive historische Marktstatistik behandeln.
 
 ### Gehostete private Instanz
@@ -751,16 +751,16 @@ So wird das wichtigste Alleinstellungsmerkmal – rechtzeitig passende, auch def
 
 ### Mindest-Release-Checkliste
 
-- [ ] `npm/pnpm test`, Typecheck und Build erfolgreich.
-- [ ] Kein Secret im Commit, Browser-Bundle oder Log.
-- [ ] Quellstatus/ToS-Entscheidung dokumentiert.
-- [ ] Migrationen/Backup mit Restore getestet.
-- [ ] `GET /health/ready` grün; Quellenstatus korrekt.
-- [ ] Mindestens ein echter eBay-Live-Durchlauf validiert.
-- [ ] Dedupe-, Preisänderungs- und Webhook-Replay-Test bestanden.
-- [ ] Warnung bei unbekannten Kosten und unbestätigter Reparierbarkeit korrekt.
-- [ ] Push nur nach Nutzerfreigabe.
-- [ ] Dokumentierter Rollback auf vorheriges Release möglich.
+- [x] `npm/pnpm test`, Typecheck und Build erfolgreich (CI, zusätzlich Migrations-Dry-Run und Image-Smoke-Test).
+- [x] Kein Secret im Commit, Browser-Bundle oder Log (gitleaks, Redaction, `SECRETS_KEY`).
+- [x] Quellstatus/ToS-Entscheidung dokumentiert (ADR 001, ADR 002).
+- [x] Migrationen/Backup mit Restore getestet (lokal, `scripts/restore-test.sh`; auf dem Host → DF-702).
+- [ ] `GET /health/ready` grün; Quellenstatus korrekt (lokal hinter Caddy grün; Server → DF-701).
+- [x] Mindestens ein echter eBay-Live-Durchlauf validiert (DF-002, `docs/provider-evaluation/ebay-2026-10-31.md`).
+- [ ] Dedupe-, Preisänderungs- und Webhook-Replay-Test bestanden (Dedupe/Preisänderung ✓ DF-208/DF-304-Tests; Webhook-Replay → DF-302/DF-706, braucht einen Provider mit Webhooks).
+- [x] Warnung bei unbekannten Kosten und unbestätigter Reparierbarkeit korrekt (T-09, DF-402).
+- [x] Push nur nach Nutzerfreigabe.
+- [x] Dokumentierter Rollback auf vorheriges Release möglich (`scripts/deploy.sh <vorherige Revision>`, README „Betrieb“).
 
 ## 13. Definition eines erfolgreichen MVP und einer erfolgreichen Beta
 

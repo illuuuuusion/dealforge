@@ -291,12 +291,6 @@ export async function providerRunStats(db: Queryable, source: string) {
     recentStatuses: recent };
 }
 
-/** Generated once on first use and shared by all processes; concurrent first calls agree on one value. */
-export async function getOrCreateSecret(db: Queryable, name: string, create: () => string) {
-  await db.query('INSERT INTO app_secrets (name, value) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING', [name, create()]);
-  return (await db.query('SELECT value FROM app_secrets WHERE name = $1', [name])).rows[0].value as string;
-}
-
 export interface PushSubscriptionInput { endpoint: string; keys: { p256dh: string; auth: string } }
 export async function savePushSubscription(db: Queryable, s: PushSubscriptionInput, userAgent: string | null) {
   const { rows } = await db.query(`INSERT INTO push_subscriptions (endpoint, p256dh, auth, user_agent) VALUES ($1, $2, $3, $4)

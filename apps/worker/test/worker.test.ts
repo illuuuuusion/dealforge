@@ -134,6 +134,17 @@ test('DF-207/DF-209: provider errors and kill switch stay isolated and show up i
   await setProviderEnabled(db, 'ebay', true);
 });
 
+test('DF-603: provider error messages are redacted before they reach the run log and the status page', async () => {
+  adapters.ebay = fake('ebay', async () => { throw new ProviderError('AUTH', 'Provider HTTP 401: {"access_token":"tok-secret-1"} Authorization: Bearer v^1.1#i^1#secret'); });
+  const w = await start();
+  await enqueuePlan(queues, [job('ebay', 'redact')], PRIORITY.manual);
+  await until(async () => (await runs('ebay|redact')).length === 1);
+  await w.close();
+  const message = (await db.query("SELECT message FROM source_runs WHERE query_key = 'ebay|redact'")).rows[0].message as string;
+  assert.match(message, /^Provider HTTP 401: /);
+  assert.doesNotMatch(message, /tok-secret-1|#secret/);
+});
+
 test('DF-303/305/307: a detected listing becomes alerts and one push per subscription; failures retry, expired subscriptions go', async () => {
   await createWatchlist(db, { name: 'Push 4070S', query: 'RTX 4070 Super', maxWorking: 470, maxDefect: 120, sourceList: ['ebay'] });
   const sub = (name: string) => ({ endpoint: `https://fcm.googleapis.com/fcm/send/${name}`, keys: { p256dh: 'p', auth: 'a' } });
